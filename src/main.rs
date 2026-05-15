@@ -1,6 +1,7 @@
-use chess::State;
-
 mod chess;
+mod engine;
+
+use chess::State;
 
 fn main() {
     let mut state = State::new();

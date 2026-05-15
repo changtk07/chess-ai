@@ -8,3 +8,10 @@ opt-level = 3
 
 [dependencies]
 arrayvec = "0.7"
+burn = { version = "0.20.1", features = [
+    "std",
+    "tui",
+    "train",
+    "wgpu",
+    "fusion",
+] }
