@@ -101,8 +101,8 @@ struct ValueHead<B: Backend> {
 impl<B: Backend> ValueHead<B> {
     // [batch_size, 64, d_model]
     fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 2> {
-        let batch_size = input.shape().dims[0] as i64;
-        let d_model = input.shape().dims[2] as f64;
+        let batch_size = input.dims()[0] as i64;
+        let d_model = input.dims()[2] as f64;
 
         let query = self.query.val().expand([batch_size, -1, -1]);
         let keys = self.keys.forward(input.clone()).swap_dims(1, 2);
@@ -152,7 +152,24 @@ pub(crate) struct TransformerModel<B: Backend> {
 impl<B: Backend> TransformerModel<B> {
     pub(crate) const HEAD_DIMENSION: usize = 64;
 
-    // TODO: forward
+    // [batch_size, 65, d_model]
+    pub(crate) fn forward(
+        &self,
+        input: Tensor<B, 3>,
+        legal_mask: Tensor<B, 2>,
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        let attn_output = self
+            .attention_blocks
+            .iter()
+            .fold(input, |x, block| block.forward(x));
+
+        let seq_len = attn_output.dims()[1];
+        let x = attn_output.narrow(1, 1, seq_len - 1);
+        let policy = self.policy_head.forward(x.clone(), legal_mask);
+        let value = self.value_head.forward(x);
+
+        (policy, value)
+    }
 }
 
 #[derive(Config, Debug)]
