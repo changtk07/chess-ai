@@ -1,7 +1,3 @@
-use std::cmp::Ordering::Equal;
-
-use burn::tensor::backend::Backend;
-
 use crate::{
     chess::{moves::Move, State},
     engine::{
@@ -9,6 +5,8 @@ use crate::{
         policy::LegalMoveMask,
     },
 };
+use burn::tensor::backend::Backend;
+use std::cmp::Ordering::Equal;
 
 struct Node {
     mv: Option<Move>,
@@ -39,6 +37,10 @@ impl Node {
 
     fn u_val(&self, c_puct: f32, sqrt_total_visits: f32) -> f32 {
         c_puct * self.prior * (sqrt_total_visits / (1.0 + self.n_visits as f32))
+    }
+
+    fn score(&self, c_puct: f32, sqrt_total_visits: f32) -> f32 {
+        self.q_val() + self.u_val(c_puct, sqrt_total_visits)
     }
 }
 
@@ -74,7 +76,7 @@ impl<B: Backend> Mcts<B> {
                 .children
                 .iter()
                 .copied()
-                .map(|b| self.nodes[b].n_visits as f32)
+                .map(|i| self.nodes[i].n_visits as f32)
                 .sum::<f32>()
                 .sqrt();
 
@@ -82,11 +84,7 @@ impl<B: Backend> Mcts<B> {
                 .children
                 .iter()
                 .copied()
-                .map(|i| {
-                    let child = &self.nodes[i];
-                    let score = child.q_val() + child.u_val(self.c_puct, sqrt_total_visits);
-                    (i, score)
-                })
+                .map(|i| (i, self.nodes[i].score(self.c_puct, sqrt_total_visits)))
                 .max_by(|(_, score_a), (_, score_b)| score_a.partial_cmp(score_b).unwrap_or(Equal))
                 .map(|(i, _)| i)
                 .unwrap();
