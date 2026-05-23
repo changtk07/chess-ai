@@ -1,12 +1,12 @@
 use std::cmp::Ordering::Equal;
 
-use burn::{serde::de::value, tensor::backend::Backend};
+use burn::tensor::backend::Backend;
 
 use crate::{
     chess::{moves::Move, State},
     engine::{
         model::{TransformerModel, TransformerModelConfig},
-        policy::{legal_move_mask, policy_index},
+        policy::LegalMoveMask,
     },
 };
 
@@ -64,11 +64,6 @@ impl<B: Backend> Mcts<B> {
         }
     }
 
-    fn simulate(&mut self) {
-        let state = State::new();
-        self.explore(0, state);
-    }
-
     fn explore(&mut self, idx: usize, mut state: State) -> f32 {
         if self.nodes[idx].n_visits > 0 {
             if self.nodes[idx].children.is_empty() {
@@ -109,15 +104,13 @@ impl<B: Backend> Mcts<B> {
         }
 
         let moves = state.generate_moves();
-        let legal_move_mask = legal_move_mask(&moves, &self.device);
-        let (policy, value) =
-            self.model
-                .forward(&[&state], legal_move_mask.unsqueeze(), &self.device);
+        let legal_move_mask = moves.legal_move_mask(&self.device).unsqueeze();
+        let (policy, value) = self.model.forward(&[&state], legal_move_mask, &self.device);
 
         self.nodes[idx].children = (self.nodes.len()..self.nodes.len() + moves.len()).collect();
 
         moves.iter().for_each(|mv| {
-            let policy_index = policy_index(mv);
+            let policy_index = mv.policy_index();
             self.nodes.push(Node::new(Some(*mv), policy[policy_index]));
         });
 
