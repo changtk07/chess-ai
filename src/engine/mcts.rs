@@ -42,6 +42,11 @@ impl Node {
     fn score(&self, c_puct: f32, sqrt_total_visits: f32) -> f32 {
         self.q_val() + self.u_val(c_puct, sqrt_total_visits)
     }
+
+    fn record_visit(&mut self, val: f32) {
+        self.n_visits += 1;
+        self.value_sum += val;
+    }
 }
 
 struct Mcts<B: Backend> {
@@ -94,9 +99,7 @@ impl<B: Backend> Mcts<B> {
             }
 
             let value = -self.explore(chosen, state);
-
-            self.nodes[idx].n_visits += 1;
-            self.nodes[idx].value_sum += value;
+            self.nodes[idx].record_visit(value);
 
             return value;
         }
@@ -112,8 +115,7 @@ impl<B: Backend> Mcts<B> {
             self.nodes.push(Node::new(Some(*mv), policy[policy_index]));
         });
 
-        self.nodes[idx].n_visits += 1;
-        self.nodes[idx].value_sum += value[0];
+        self.nodes[idx].record_visit(value[0]);
 
         value[0]
     }
