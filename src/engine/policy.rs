@@ -77,7 +77,7 @@ pub(crate) trait LegalMoveMask<B: Backend> {
 impl<B: Backend> LegalMoveMask<B> for State {
     fn legal_move_mask(&self, device: &<B as Backend>::Device) -> Tensor<B, 1> {
         let n = 64 * N_MOVE_PLANES;
-        let mut data: Vec<f32> = vec![f32::NEG_INFINITY; n];
+        let mut data: Vec<f32> = vec![-1e9; n];
 
         self.generate_moves()
             .iter()
@@ -157,11 +157,9 @@ mod tests {
                     );
                 } else {
                     assert_eq!(
-                        val,
-                        f32::NEG_INFINITY,
+                        val, -1e9,
                         "Index {} should be -inf for illegal move in FEN: {}",
-                        idx,
-                        fen
+                        idx, fen
                     );
                 }
             }
