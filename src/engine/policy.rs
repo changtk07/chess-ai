@@ -1,9 +1,7 @@
 use crate::chess::{
     moves::{Move, MoveType},
     types::Direction,
-    State,
 };
-use arrayvec::ArrayVec;
 use burn::{
     tensor::{backend::Backend, TensorData},
     Tensor,

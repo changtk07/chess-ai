@@ -137,10 +137,10 @@ struct PolicyHead<B: Backend> {
 
 impl<B: Backend> PolicyHead<B> {
     // [batch_size, 64, d_model]
-    fn forward(&self, input: Tensor<B, 3>, legal_mask: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, input: Tensor<B, 3>, legal_move_mask: Tensor<B, 2>) -> Tensor<B, 2> {
         let x = self.ff.forward(input);
         let x = x.flatten(1, 2);
-        let x = x + legal_mask;
+        let x = x + legal_move_mask;
         softmax(x, 1)
     }
 }
@@ -202,9 +202,9 @@ impl<B: Backend> TransformerModel<B> {
     pub(crate) fn forward(
         &self,
         states: &[&State],
-        legal_mask: Tensor<B, 2>,
+        legal_move_mask: Tensor<B, 2>,
         device: &B::Device,
-    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    ) -> (Vec<f32>, Vec<f32>) {
         let attn_input = self.embedding.forward(states, device);
 
         let attn_output = self
@@ -216,10 +216,13 @@ impl<B: Backend> TransformerModel<B> {
         let cls_token = attn_output.clone().narrow(1, 0, 1).squeeze_dim(1); // [B, d_model]
         let squares = attn_output.narrow(1, 1, seq_len - 1); // [B, 64, d_model]
 
-        let policy = self.policy_head.forward(squares, legal_mask);
+        let policy = self.policy_head.forward(squares, legal_move_mask);
         let value = self.value_head.forward(cls_token);
 
-        (policy, value)
+        (
+            policy.to_data().to_vec().unwrap(),
+            value.to_data().to_vec().unwrap(),
+        )
     }
 }
 
