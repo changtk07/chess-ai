@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use burn::tensor::backend::Backend;
-use std::cmp::Ordering::Equal;
+use std::cmp::Ordering;
 
 struct Node {
     mv: Option<Move>,
@@ -90,7 +90,7 @@ impl<B: Backend> Mcts<B> {
                 .iter()
                 .copied()
                 .map(|i| (i, self.nodes[i].score(self.c_puct, sqrt_total_visits)))
-                .max_by(|(_, score_a), (_, score_b)| score_a.partial_cmp(score_b).unwrap_or(Equal))
+                .max_by(|(_, sa), (_, sb)| sa.partial_cmp(sb).unwrap_or(Ordering::Equal))
                 .map(|(i, _)| i)
                 .unwrap();
 
