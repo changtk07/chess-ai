@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 const MIN_DURATION: Duration = Duration::from_secs(2);
 const MIN_ITERS: u32 = 2;
+const MAX_WARM_UP_ITERS: usize = 10;
+// Warm-up ends when a call takes over 90% as long as the one before it
+const SETTLED_RATIO: f64 = 0.9;
 const SEARCH_N_SIMS: usize = 128;
 
 pub(crate) fn run<B: Backend>(device: &B::Device, max_batch_size: usize) {
@@ -53,9 +56,18 @@ fn evaluate_batch<B: Backend>(model: &TransformerModel<B>, batch_size: usize, de
     model.forward(&states, moves.legal_move_mask(device), device);
 }
 
-/// Mean duration of `f` after a warm-up call, which lets GPU backends compile their kernels.
+/// Mean duration of `f` once its calls stop getting faster. GPU backends compile and autotune
+/// kernels during the first calls with each new tensor shape, which can take seconds per call.
 fn time_per_iter(mut f: impl FnMut()) -> Duration {
-    f();
+    let mut previous = time_once(&mut f);
+    for _ in 0..MAX_WARM_UP_ITERS {
+        let current = time_once(&mut f);
+        let settled = current.as_secs_f64() > SETTLED_RATIO * previous.as_secs_f64();
+        previous = current;
+        if settled {
+            break;
+        }
+    }
 
     let start = Instant::now();
     let mut iters = 0;
@@ -65,4 +77,10 @@ fn time_per_iter(mut f: impl FnMut()) -> Duration {
     }
 
     start.elapsed() / iters
+}
+
+fn time_once(f: &mut impl FnMut()) -> Duration {
+    let start = Instant::now();
+    f();
+    start.elapsed()
 }
