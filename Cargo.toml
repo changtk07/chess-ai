@@ -9,6 +9,7 @@ opt-level = 3
 [dependencies]
 arrayvec = "0.7"
 rand = "0.9"
+rand_distr = "0.5"
 burn = { version = "0.20.1", features = [
     "std",
     "tui",

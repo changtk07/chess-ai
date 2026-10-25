@@ -143,6 +143,11 @@ impl Search {
         &self.leaf_moves
     }
 
+    /// Whether the pending leaf is the root, which happens once per search, on its first simulation.
+    pub(crate) fn leaf_is_root(&self) -> bool {
+        self.path.len() == 1
+    }
+
     pub(crate) fn n_sims_done(&self) -> usize {
         self.n_sims_done
     }
@@ -370,6 +375,7 @@ mod tests {
         while search.next_leaf(&mut state) {
             // Only the first simulation stops at the root itself
             assert_eq!(state.to_string() == root, n_evaluations == 0);
+            assert_eq!(search.leaf_is_root(), n_evaluations == 0);
             assert_eq!(search.leaf_moves(), state.generate_moves().as_slice());
 
             let n_moves = search.leaf_moves().len();

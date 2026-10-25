@@ -2,11 +2,12 @@ use crate::{
     chess::{moves::Move, types::Color, Outcome, State},
     engine::{
         mcts::{MctsConfig, Search},
-        model::TransformerModel,
+        model::{Evaluation, TransformerModel},
     },
 };
 use burn::{config::Config, tensor::backend::Backend};
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand_distr::{Distribution, Gamma};
 use std::time::{Duration, Instant};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
@@ -24,6 +25,12 @@ pub(crate) struct SelfPlayConfig {
     /// Games still going after this many plies are stopped
     #[config(default = 512)]
     max_plies: usize,
+    /// Dirichlet noise mixed into the root priors of every search, so games explore moves the
+    /// network rates low: concentration alpha, and the noise's share of each prior
+    #[config(default = 0.3)]
+    noise_alpha: f32,
+    #[config(default = 0.25)]
+    noise_fraction: f32,
     #[config(default = 0)]
     seed: u64,
 }
@@ -117,6 +124,18 @@ impl Game {
         None
     }
 
+    fn apply(&mut self, mut evaluation: Evaluation, config: &SelfPlayConfig) {
+        if self.search.leaf_is_root() && config.noise_fraction > 0.0 {
+            add_noise(
+                &mut evaluation.priors,
+                config.noise_alpha,
+                config.noise_fraction,
+                &mut self.rng,
+            );
+        }
+        self.search.apply(&mut self.state, evaluation);
+    }
+
     fn result(&self, config: &SelfPlayConfig) -> Option<GameResult> {
         match self.state.outcome(&self.state.generate_moves()) {
             Some(Outcome::Checkmate) => Some(match self.state.turn {
@@ -196,7 +215,7 @@ pub(crate) fn run<B: Backend>(
 
         let apply_start = Instant::now();
         for (game, evaluation) in games.iter_mut().zip(evaluations) {
-            game.search.apply(&mut game.state, evaluation);
+            game.apply(evaluation, config);
         }
         stats.apply_time += apply_start.elapsed();
 
@@ -209,6 +228,21 @@ pub(crate) fn run<B: Backend>(
 
     update_totals(&mut stats, &games, finished_sims, start);
     stats
+}
+
+/// Mixes Dirichlet(alpha) noise into `priors`, which keep summing to 1. The noise is drawn by
+/// normalizing independent Gamma(alpha, 1) samples.
+fn add_noise(priors: &mut [f32], alpha: f32, fraction: f32, rng: &mut impl Rng) {
+    let gamma = Gamma::new(alpha, 1.0).expect("the noise alpha must be positive");
+    let noise: Vec<f32> = priors.iter().map(|_| gamma.sample(rng)).collect();
+    let total: f32 = noise.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+
+    for (prior, noise) in priors.iter_mut().zip(noise) {
+        *prior = (1.0 - fraction) * *prior + fraction * noise / total;
+    }
 }
 
 fn update_totals(stats: &mut SelfPlayStats, games: &[Game], finished_sims: usize, start: Instant) {
@@ -270,6 +304,48 @@ mod tests {
         // Each step evaluates one position per game still going, never more than the slots
         assert!(stats.n_steps <= stats.n_evaluations);
         assert!(stats.n_evaluations <= stats.n_steps * 4);
+    }
+
+    #[test]
+    fn noise_keeps_priors_a_distribution() {
+        let uniform = vec![0.05; 20];
+        let noisy = |seed| {
+            let mut priors = uniform.clone();
+            add_noise(&mut priors, 0.3, 0.25, &mut StdRng::seed_from_u64(seed));
+            priors
+        };
+
+        let priors = noisy(1);
+        assert!((priors.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        // Each prior keeps at least its unmixed share
+        assert!(priors.iter().all(|&p| p >= 0.75 * 0.05 - 1e-6));
+        assert_ne!(priors, uniform);
+        assert_eq!(priors, noisy(1));
+        assert_ne!(priors, noisy(2));
+    }
+
+    #[test]
+    fn noise_changes_the_search() {
+        // One game's first search with uniform priors, so only the noise can favour a move
+        let first_search_visits = |config: &SelfPlayConfig| {
+            let mut game = Game::new(&MctsConfig::new().with_n_sims(50), 0);
+            while game.search.next_leaf(&mut game.state) {
+                let n_moves = game.search.leaf_moves().len();
+                let evaluation = Evaluation {
+                    priors: vec![1.0 / n_moves as f32; n_moves],
+                    value: 0.0,
+                };
+                game.apply(evaluation, config);
+            }
+            game.search.result().visits
+        };
+
+        let noisy = first_search_visits(&SelfPlayConfig::new());
+        assert_eq!(noisy, first_search_visits(&SelfPlayConfig::new()));
+        assert_ne!(
+            noisy,
+            first_search_visits(&SelfPlayConfig::new().with_noise_fraction(0.0))
+        );
     }
 
     #[test]
