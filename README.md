@@ -7,11 +7,13 @@ The network isn't trained yet. The engine plays complete, legal games, but with 
 ## Usage
 
 ```sh
-cargo run --release              # play one self-play game with untrained weights
-cargo run --release -- perft 5   # count positions at depth 5 from the start, per root move
+cargo run --release -- self-play --backend cuda-bf16   # play 256 games at once with untrained weights
 cargo run --release -- bench     # network throughput by batch size (up to 256), and search speed
-cargo test                       # move generation, game outcome and search tests
+cargo run --release -- perft 5   # count positions at depth 5 from the start, per root move
+cargo test                       # move generation, game outcome, search and self-play tests
 ```
+
+`self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, and applying its results.
 
 Commands run on the CPU by default. Add `--backend cuda` to run on an NVIDIA GPU, or `cuda-f16` / `cuda-bf16` for half precision, e.g. `cargo run --release -- bench 4096 --backend cuda-f16`. The first run on a GPU spends a minute or more compiling kernels.
 
@@ -44,10 +46,16 @@ The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter un
 
 - PUCT selection, with the network supplying move priors and position values at the leaves, and exact values for finished games.
 - Each search returns root visit counts. The move is either the most visited or sampled with a temperature.
+- A search pauses whenever it reaches a position the network must evaluate, so many searches can share one batch.
+
+**Self-play** (`src/engine/self_play.rs`)
+
+- Many games run at once. Each step, every game's search advances to its next position needing the network, and all of those positions are evaluated in one batch on the GPU.
+- Moves are sampled by visit count for the first 30 plies, then chosen greedily. Each game has its own seeded random generator, so runs are reproducible.
 
 ## Roadmap
 
-- [ ] Batched leaf evaluation on a GPU backend, in progress: see [docs/performance-plan.md](docs/performance-plan.md)
+- [x] Batched leaf evaluation on a GPU backend: see [docs/performance-plan.md](docs/performance-plan.md)
 - [ ] Self-play data generation
 - [ ] Training loop
 - [ ] UCI interface

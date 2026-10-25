@@ -3,10 +3,11 @@ mod chess;
 mod engine;
 
 use crate::{
-    chess::{Outcome, State},
+    chess::State,
     engine::{
-        mcts::{Mcts, MctsConfig},
+        mcts::MctsConfig,
         model::TransformerModelConfig,
+        self_play::{self as self_play_driver, GameResult, SelfPlayConfig, SelfPlayStats},
     },
 };
 use burn::{
@@ -15,10 +16,14 @@ use burn::{
 };
 use std::time::Instant;
 
-const SELF_PLAY_N_SIMS: usize = 64;
-const SELF_PLAY_MAX_PLIES: usize = 512;
-// Sample moves early so repeated runs don't replay the same game
-const SELF_PLAY_SAMPLING_PLIES: usize = 30;
+const USAGE: &str = "\
+Usage: cinder <command> [--backend cpu|cuda|cuda-f16|cuda-bf16]
+
+Commands:
+  self-play [--parallel 256] [--sims 800] [--games 256] [--seed 0]
+                      play games with untrained weights, reporting throughput
+  bench [max_batch]   network throughput by batch size, then search speed
+  perft [depth]       count positions from the start, per root move";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,7 +45,8 @@ fn run<B: Backend>(args: &[String], device: &B::Device) {
             device,
             args.get(1).map_or(256, |size| size.parse().unwrap()),
         ),
-        _ => self_play::<B>(device),
+        Some("self-play") => self_play::<B>(&args[1..], device),
+        _ => println!("{USAGE}"),
     }
 }
 
@@ -62,49 +68,74 @@ fn perft(depth: u8) {
     println!("Time taken: {:?}", elapsed);
 }
 
-// Plays one game with untrained weights to exercise search end to end
-fn self_play<B: Backend>(device: &B::Device) {
+fn self_play<B: Backend>(args: &[String], device: &B::Device) {
+    let mut args = args.to_vec();
+    let mut option = |name: &str, default: usize| {
+        take_option(&mut args, name).map_or(default, |value| value.parse().unwrap())
+    };
+    let n_parallel = option("--parallel", 256);
+    let n_sims = option("--sims", 800);
+    let n_games = option("--games", 256);
+    let seed = option("--seed", 0);
+
     let model = TransformerModelConfig::new().init::<B>(device);
-    let config = MctsConfig::new().with_n_sims(SELF_PLAY_N_SIMS);
-    let mut mcts = Mcts::new(&model, config, device);
-    let mut rng = rand::rng();
-    let mut state = State::new();
-    let start_time = Instant::now();
+    let mcts_config = MctsConfig::new().with_n_sims(n_sims);
+    let config = SelfPlayConfig::new()
+        .with_n_parallel(n_parallel)
+        .with_n_games(n_games)
+        .with_seed(seed as u64);
 
-    for ply in 0..SELF_PLAY_MAX_PLIES {
-        let moves = state.generate_moves();
-
-        if let Some(outcome) = state.outcome(&moves) {
-            println!("\n{state}");
-            match outcome {
-                Outcome::Checkmate => println!("{} wins by checkmate", state.turn.flip()),
-                Outcome::Draw => println!("Draw"),
-            }
-            println!("{} plies in {:?}", ply, start_time.elapsed());
-            return;
-        }
-
-        let result = mcts.search(&mut state);
-        let temperature = if ply < SELF_PLAY_SAMPLING_PLIES {
-            1.0
-        } else {
-            0.0
-        };
-        let mv = result.sample_move(temperature, &mut rng).unwrap();
-
-        println!(
-            "{:>3}. {} {} (value {:+.2})",
-            ply + 1,
-            state.turn,
-            mv,
-            result.value
-        );
-        state.make_move(mv);
-    }
-
-    println!("\n{state}");
     println!(
-        "Stopped after {SELF_PLAY_MAX_PLIES} plies in {:?}",
-        start_time.elapsed()
+        "Backend: {}, {n_parallel} games at a time, {n_sims} simulations per move",
+        B::name(device)
+    );
+
+    let mut previous = SelfPlayStats::default();
+    let stats = self_play_driver::run(&model, &mcts_config, &config, device, |stats| {
+        print_progress(stats, &previous);
+        previous = stats.clone();
+    });
+
+    let count = |result| {
+        stats
+            .games
+            .iter()
+            .filter(|record| record.result == result)
+            .count()
+    };
+    let total_plies: usize = stats.games.iter().map(|record| record.plies).sum();
+    println!(
+        "\n{} games: {} white wins, {} black wins, {} draws, {} stopped at the ply limit, {:.0} plies on average",
+        stats.games.len(),
+        count(GameResult::WhiteWins),
+        count(GameResult::BlackWins),
+        count(GameResult::Draw),
+        count(GameResult::PlyLimit),
+        total_plies as f64 / stats.games.len() as f64,
+    );
+    print!("Overall: ");
+    print_progress(&stats, &SelfPlayStats::default());
+}
+
+// Rates over the interval since `previous`, and where that time went
+fn print_progress(current: &SelfPlayStats, previous: &SelfPlayStats) {
+    let seconds = (current.elapsed - previous.elapsed).as_secs_f64();
+    let evaluations = (current.n_evaluations - previous.n_evaluations) as f64;
+    let steps = (current.n_steps - previous.n_steps) as f64;
+    let share = |now: std::time::Duration, before: std::time::Duration| {
+        100.0 * (now - before).as_secs_f64() / seconds
+    };
+
+    println!(
+        "{:>5.0}s  games {:>4}  {:>6.0} sims/s  {:>6.0} evals/s  batch {:>5.1}  \
+         time: select {:>4.1}%, network {:>4.1}%, apply {:>4.1}%",
+        current.elapsed.as_secs_f64(),
+        current.games.len(),
+        (current.n_sims - previous.n_sims) as f64 / seconds,
+        evaluations / seconds,
+        evaluations / steps,
+        share(current.select_time, previous.select_time),
+        share(current.evaluate_time, previous.evaluate_time),
+        share(current.apply_time, previous.apply_time),
     );
 }

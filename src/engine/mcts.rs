@@ -143,6 +143,10 @@ impl Search {
         &self.leaf_moves
     }
 
+    pub(crate) fn n_sims_done(&self) -> usize {
+        self.n_sims_done
+    }
+
     /// Expands the pending leaf with the network's evaluation, backs its value up the tree and
     /// returns `state` to the root.
     pub(crate) fn apply(&mut self, state: &mut State, evaluation: Evaluation) {
@@ -168,7 +172,6 @@ impl Search {
                 .children()
                 .map(|i| (self.nodes[i].mv.unwrap(), self.nodes[i].n_visits))
                 .collect(),
-            value: root.q_val(),
         }
     }
 
@@ -258,8 +261,6 @@ impl<'a, B: Backend> Mcts<'a, B> {
 pub(crate) struct SearchResult {
     /// Root moves with their visit counts; empty if the root is a finished game
     pub(crate) visits: Vec<(Move, usize)>,
-    /// From the perspective of the side to move at the root
-    pub(crate) value: f32,
 }
 
 impl SearchResult {
@@ -342,11 +343,10 @@ mod tests {
             10,
         );
         assert!(mated.visits.is_empty());
-        assert_eq!(mated.value, -1.0);
+        assert_eq!(mated.best_move(), None);
 
         let stalemate = search(&mut State::from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1"), 10);
         assert!(stalemate.visits.is_empty());
-        assert_eq!(stalemate.value, 0.0);
         assert_eq!(stalemate.best_move(), None);
     }
 
