@@ -67,6 +67,26 @@ impl State {
         state
     }
 
+    pub fn to_fen(&self) -> String {
+        let turn = match self.turn {
+            Color::White => 'w',
+            Color::Black => 'b',
+        };
+        let en_passant = self
+            .en_passant
+            .map_or_else(|| "-".to_string(), |position| position.to_string());
+
+        format!(
+            "{} {} {} {} {} {}",
+            self.board.to_fen(),
+            turn,
+            self.castling_rights,
+            en_passant,
+            self.halfmove_clock,
+            self.fullmove_number
+        )
+    }
+
     // ------------------------------------------------------------------------
     // Move Making
     // ------------------------------------------------------------------------
@@ -725,6 +745,44 @@ mod tests {
         assert_eq!(outcome_of("8/8/8/4k3/8/8/4K3/4NN2 w - - 0 1"), None);
         assert_eq!(outcome_of("8/8/8/4k3/8/8/4K3/4R3 w - - 0 1"), None);
         assert_eq!(outcome_of("8/8/8/4k3/8/8/4KP2/8 w - - 0 1"), None);
+    }
+
+    #[test]
+    fn fen_round_trips() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+            "8/8/8/4k3/8/8/4K3/4R3 b - - 99 80",
+        ] {
+            assert_eq!(State::from_fen(fen).to_fen(), fen);
+        }
+    }
+
+    #[test]
+    fn fen_of_a_played_position() {
+        // Castling, captures of rights, a double push allowing en passant and the clocks
+        let mut state = State::new();
+        play(
+            &mut state,
+            &[
+                "e2e4", "c7c5", "g1f3", "d7d6", "f1e2", "b8c6", "e1g1", "c5c4", "d2d4",
+            ],
+        );
+
+        let fen = state.to_fen();
+        assert_eq!(
+            fen,
+            "r1bqkbnr/pp2pppp/2np4/8/2pPP3/5N2/PPP1BPPP/RNBQ1RK1 b kq d3 0 5"
+        );
+
+        // The incrementally updated hash matches one computed from scratch
+        let parsed = State::from_fen(&fen);
+        assert_eq!(parsed.hash, state.hash);
+        assert_eq!(parsed.generate_moves(), state.generate_moves());
     }
 
     #[test]

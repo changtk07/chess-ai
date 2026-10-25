@@ -256,6 +256,35 @@ impl Board {
         board
     }
 
+    /// Piece placement, from rank 8 down to rank 1.
+    pub(crate) fn to_fen(&self) -> String {
+        let mut fen = String::with_capacity(71);
+
+        for rank in (0..8).rev() {
+            let mut n_empty = 0;
+            for file in 0..8 {
+                match self.mailbox[rank * 8 + file] {
+                    Some(piece) => {
+                        if n_empty > 0 {
+                            fen.push_str(&n_empty.to_string());
+                            n_empty = 0;
+                        }
+                        fen.push_str(&piece.to_string());
+                    }
+                    None => n_empty += 1,
+                }
+            }
+            if n_empty > 0 {
+                fen.push_str(&n_empty.to_string());
+            }
+            if rank > 0 {
+                fen.push('/');
+            }
+        }
+
+        fen
+    }
+
     pub(crate) const fn is_occupied(&self, position: Position) -> bool {
         self.occupancy.contains(position)
     }
