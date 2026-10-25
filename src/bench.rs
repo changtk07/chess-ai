@@ -6,7 +6,7 @@ use crate::{
         policy::LegalMoveMask,
     },
 };
-use burn::{tensor::backend::Backend, Tensor};
+use burn::tensor::backend::Backend;
 use std::time::{Duration, Instant};
 
 const MIN_DURATION: Duration = Duration::from_secs(2);
@@ -48,12 +48,9 @@ pub(crate) fn run<B: Backend>(device: &B::Device, max_batch_size: usize) {
 fn evaluate_batch<B: Backend>(model: &TransformerModel<B>, batch_size: usize, device: &B::Device) {
     let state = State::new();
     let states = vec![&state; batch_size];
-    let masks = states
-        .iter()
-        .map(|state| state.generate_moves().legal_move_mask(device))
-        .collect();
+    let moves: Vec<_> = states.iter().map(|state| state.generate_moves()).collect();
 
-    model.forward(&states, Tensor::stack(masks, 0), device);
+    model.forward(&states, moves.legal_move_mask(device), device);
 }
 
 /// Mean duration of `f` after a warm-up call, which lets GPU backends compile their kernels.

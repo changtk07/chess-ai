@@ -153,7 +153,7 @@ impl<'a, B: Backend> Mcts<'a, B> {
             return value;
         }
 
-        let legal_move_mask = moves.legal_move_mask(&self.device).unsqueeze();
+        let legal_move_mask = [&moves].legal_move_mask(&self.device);
         let (policy, value) = self.model.forward(&[state], legal_move_mask, &self.device);
 
         self.nodes[idx].children = (self.nodes.len()..self.nodes.len() + moves.len()).collect();
