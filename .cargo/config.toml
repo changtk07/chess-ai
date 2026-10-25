@@ -1,0 +1,4 @@
+[env]
+# cudarc 0.18 (used by burn's CUDA backend) rejects toolkits newer than CUDA 13.1, so build against
+# its 13.1 bindings, which also work with later 13.x toolkits and drivers
+CUDARC_CUDA_VERSION = "13010"

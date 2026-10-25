@@ -220,8 +220,8 @@ impl<B: Backend> TransformerModel<B> {
         let value = self.value_head.forward(cls_token);
 
         (
-            policy.to_data().to_vec().unwrap(),
-            value.to_data().to_vec().unwrap(),
+            policy.to_data().convert::<f32>().to_vec().unwrap(),
+            value.to_data().convert::<f32>().to_vec().unwrap(),
         )
     }
 }
@@ -259,5 +259,78 @@ impl TransformerModelConfig {
             policy_head: PolicyHeadConfig::new().with_d_model(d_model).init(device),
             value_head: ValueHeadConfig::new().with_d_model(d_model).init(device),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::policy::LegalMoveMask;
+    use burn::{
+        backend::{Cuda, NdArray},
+        record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
+        tensor::{bf16, f16},
+    };
+
+    const FENS: [&str; 3] = [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+    ];
+
+    fn evaluate<B: Backend>(
+        model: &TransformerModel<B>,
+        device: &B::Device,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let states: Vec<State> = FENS.iter().map(|fen| State::from_fen(fen)).collect();
+        let states: Vec<&State> = states.iter().collect();
+        let moves: Vec<_> = states.iter().map(|state| state.generate_moves()).collect();
+        model.forward(&states, moves.legal_move_mask(device), device)
+    }
+
+    fn max_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    // Runs the same weights on the CPU and on backend B
+    fn assert_matches_cpu<B: Backend>(tolerance: f32) {
+        let cpu_device = Default::default();
+        let cpu_model = TransformerModelConfig::new().init::<NdArray>(&cpu_device);
+        let (cpu_policy, cpu_value) = evaluate(&cpu_model, &cpu_device);
+
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let bytes = recorder.record(cpu_model.into_record(), ()).unwrap();
+        let device = Default::default();
+        let model = TransformerModelConfig::new()
+            .init::<B>(&device)
+            .load_record(recorder.load(bytes, &device).unwrap());
+        let (policy, value) = evaluate(&model, &device);
+
+        // `f32::max` skips NaN, so check for it before comparing
+        assert!(policy.iter().chain(&value).all(|x| x.is_finite()));
+        assert!(max_diff(&policy, &cpu_policy) < tolerance);
+        assert!(max_diff(&value, &cpu_value) < tolerance);
+    }
+
+    // Tolerances are about 10x the differences measured on an RTX 4090
+    #[test]
+    #[ignore = "requires a CUDA GPU"]
+    fn cuda_matches_cpu() {
+        assert_matches_cpu::<Cuda>(1e-3);
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA GPU"]
+    fn cuda_f16_matches_cpu() {
+        assert_matches_cpu::<Cuda<f16>>(5e-3);
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA GPU"]
+    fn cuda_bf16_matches_cpu() {
+        assert_matches_cpu::<Cuda<bf16>>(3e-2);
     }
 }

@@ -13,7 +13,15 @@ cargo run --release -- bench     # network throughput by batch size (up to 256),
 cargo test                       # move generation, game outcome and search tests
 ```
 
-Self-play runs on burn's NdArray (CPU) backend. The wgpu backend is enabled in `Cargo.toml`, but finds no Vulkan adapter under WSL2.
+Commands run on the CPU by default. Add `--backend cuda` to run on an NVIDIA GPU, or `cuda-f16` / `cuda-bf16` for half precision, e.g. `cargo run --release -- bench 4096 --backend cuda-f16`. The first run on a GPU spends a minute or more compiling kernels.
+
+The CUDA backend needs the CUDA 13 toolkit, for its runtime compiler NVRTC. `.cargo/config.toml` pins cudarc to its CUDA 13.1 bindings, since cudarc 0.18 rejects newer 13.x toolkits. To check that the GPU computes the same results as the CPU:
+
+```sh
+cargo test --release -- --ignored
+```
+
+The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter under WSL2.
 
 ## How it works
 
