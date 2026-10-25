@@ -1,6 +1,6 @@
 use crate::{
-    chess::{board::CastlingRights, State},
-    engine::policy::N_MOVE_PLANES,
+    chess::{board::CastlingRights, moves::Move, State},
+    engine::policy::{LegalMoveIndices, N_MOVE_PLANES},
 };
 use burn::{
     config::Config,
@@ -12,7 +12,7 @@ use burn::{
     tensor::{
         activation::{gelu, softmax, tanh},
         backend::Backend,
-        TensorData,
+        Int, TensorData,
     },
     Tensor,
 };
@@ -136,12 +136,16 @@ struct PolicyHead<B: Backend> {
 }
 
 impl<B: Backend> PolicyHead<B> {
-    // [batch_size, 64, d_model]
-    fn forward(&self, input: Tensor<B, 3>, legal_move_mask: Tensor<B, 2>) -> Tensor<B, 2> {
+    // [batch_size, 64, d_model] -> logits of the legal moves, [batch_size, max legal moves]
+    fn forward(
+        &self,
+        input: Tensor<B, 3>,
+        move_indices: Tensor<B, 2, Int>,
+        padding: Tensor<B, 2>,
+    ) -> Tensor<B, 2> {
         let x = self.ff.forward(input);
         let x = x.flatten(1, 2);
-        let x = x + legal_move_mask;
-        softmax(x, 1)
+        x.gather(1, move_indices) + padding
     }
 }
 
@@ -198,13 +202,24 @@ pub(crate) struct TransformerModel<B: Backend> {
     value_head: ValueHead<B>,
 }
 
+/// Network output for one position: a prior per legal move, in the order the moves were given,
+/// and the value for the side to move.
+pub(crate) struct Evaluation {
+    pub(crate) priors: Vec<f32>,
+    pub(crate) value: f32,
+}
+
 impl<B: Backend> TransformerModel<B> {
+    /// Returns legal-move logits, [batch_size, max legal moves], and values, [batch_size, 1].
+    /// Logits past a position's own move count are padding.
     pub(crate) fn forward(
         &self,
         states: &[&State],
-        legal_move_mask: Tensor<B, 2>,
+        moves: &[impl AsRef<[Move]>],
         device: &B::Device,
-    ) -> (Vec<f32>, Vec<f32>) {
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        assert_eq!(states.len(), moves.len());
+        let (move_indices, padding) = moves.legal_move_indices(device);
         let attn_input = self.embedding.forward(states, device);
 
         let attn_output = self
@@ -216,13 +231,31 @@ impl<B: Backend> TransformerModel<B> {
         let cls_token = attn_output.clone().narrow(1, 0, 1).squeeze_dim(1); // [B, d_model]
         let squares = attn_output.narrow(1, 1, seq_len - 1); // [B, 64, d_model]
 
-        let policy = self.policy_head.forward(squares, legal_move_mask);
+        let policy = self.policy_head.forward(squares, move_indices, padding);
         let value = self.value_head.forward(cls_token);
 
-        (
-            policy.to_data().convert::<f32>().to_vec().unwrap(),
-            value.to_data().convert::<f32>().to_vec().unwrap(),
-        )
+        (policy, value)
+    }
+
+    /// Evaluates a batch of positions, reading priors and values back from the device at once.
+    pub(crate) fn evaluate(
+        &self,
+        states: &[&State],
+        moves: &[impl AsRef<[Move]>],
+        device: &B::Device,
+    ) -> Vec<Evaluation> {
+        let (logits, value) = self.forward(states, moves, device);
+        let width = logits.dims()[1];
+        let output = Tensor::cat(vec![softmax(logits, 1), value], 1);
+        let data = output.into_data().convert::<f32>().to_vec::<f32>().unwrap();
+
+        data.chunks_exact(width + 1)
+            .zip(moves)
+            .map(|(row, moves)| Evaluation {
+                priors: row[..moves.as_ref().len()].to_vec(),
+                value: row[width],
+            })
+            .collect()
     }
 }
 
@@ -265,7 +298,6 @@ impl TransformerModelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::policy::LegalMoveMask;
     use burn::{
         backend::{Cuda, NdArray},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
@@ -278,14 +310,65 @@ mod tests {
         "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
     ];
 
-    fn evaluate<B: Backend>(
+    fn evaluate_fens<B: Backend>(
         model: &TransformerModel<B>,
+        fens: &[&str],
         device: &B::Device,
-    ) -> (Vec<f32>, Vec<f32>) {
-        let states: Vec<State> = FENS.iter().map(|fen| State::from_fen(fen)).collect();
+    ) -> Vec<Evaluation> {
+        let states: Vec<State> = fens.iter().map(|fen| State::from_fen(fen)).collect();
         let states: Vec<&State> = states.iter().collect();
         let moves: Vec<_> = states.iter().map(|state| state.generate_moves()).collect();
-        model.forward(&states, moves.legal_move_mask(device), device)
+        model.evaluate(&states, &moves, device)
+    }
+
+    // All priors in order, then all values
+    fn flatten(evaluations: &[Evaluation]) -> (Vec<f32>, Vec<f32>) {
+        let priors = evaluations.iter().flat_map(|e| e.priors.clone()).collect();
+        let values = evaluations.iter().map(|e| e.value).collect();
+        (priors, values)
+    }
+
+    fn tiny_model() -> TransformerModel<NdArray> {
+        TransformerModelConfig::new()
+            .with_n_blocks(1)
+            .with_n_heads(2)
+            .with_head_dimension(16)
+            .init(&Default::default())
+    }
+
+    // The positions have 20, 48 and 6 legal moves, so the shorter rows are padded
+    #[test]
+    fn batched_evaluation_matches_single_positions() {
+        let model = tiny_model();
+        let device = Default::default();
+        let batched = evaluate_fens(&model, &FENS, &device);
+
+        for (fen, evaluation) in FENS.iter().zip(&batched) {
+            let single = evaluate_fens(&model, &[fen], &device).remove(0);
+            let n_moves = State::from_fen(fen).generate_moves().len();
+
+            assert_eq!(evaluation.priors.len(), n_moves);
+            assert!((evaluation.priors.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            assert!(max_diff(&evaluation.priors, &single.priors) < 1e-5);
+            assert!((evaluation.value - single.value).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn priors_follow_their_moves() {
+        let model = tiny_model();
+        let device = Default::default();
+        let state = State::from_fen(FENS[1]);
+        let moves = state.generate_moves();
+        let reversed: Vec<Move> = moves.iter().rev().copied().collect();
+
+        let forward = model.evaluate(&[&state], &[&moves[..]], &device).remove(0);
+        let mut backward = model
+            .evaluate(&[&state], &[&reversed[..]], &device)
+            .remove(0);
+        backward.priors.reverse();
+
+        assert!(max_diff(&forward.priors, &backward.priors) < 1e-6);
     }
 
     fn max_diff(a: &[f32], b: &[f32]) -> f32 {
@@ -299,7 +382,7 @@ mod tests {
     fn assert_matches_cpu<B: Backend>(tolerance: f32) {
         let cpu_device = Default::default();
         let cpu_model = TransformerModelConfig::new().init::<NdArray>(&cpu_device);
-        let (cpu_policy, cpu_value) = evaluate(&cpu_model, &cpu_device);
+        let (cpu_policy, cpu_value) = flatten(&evaluate_fens(&cpu_model, &FENS, &cpu_device));
 
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
         let bytes = recorder.record(cpu_model.into_record(), ()).unwrap();
@@ -307,7 +390,7 @@ mod tests {
         let model = TransformerModelConfig::new()
             .init::<B>(&device)
             .load_record(recorder.load(bytes, &device).unwrap());
-        let (policy, value) = evaluate(&model, &device);
+        let (policy, value) = flatten(&evaluate_fens(&model, &FENS, &device));
 
         // `f32::max` skips NaN, so check for it before comparing
         assert!(policy.iter().chain(&value).all(|x| x.is_finite()));

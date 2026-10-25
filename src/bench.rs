@@ -3,7 +3,6 @@ use crate::{
     engine::{
         mcts::{Mcts, MctsConfig},
         model::{TransformerModel, TransformerModelConfig},
-        policy::LegalMoveMask,
     },
 };
 use burn::tensor::backend::Backend;
@@ -20,7 +19,7 @@ pub(crate) fn run<B: Backend>(device: &B::Device, max_batch_size: usize) {
     let model = TransformerModelConfig::new().init::<B>(device);
     println!("Backend: {}", B::name(device));
 
-    println!("\nNetwork: legal move mask, forward pass and readback");
+    println!("\nNetwork: input encoding, forward pass and readback");
     println!("{:>6} {:>10} {:>12}", "batch", "ms/call", "positions/s");
     for batch_size in (0..)
         .map(|i| 4usize.pow(i))
@@ -53,7 +52,7 @@ fn evaluate_batch<B: Backend>(model: &TransformerModel<B>, batch_size: usize, de
     let states = vec![&state; batch_size];
     let moves: Vec<_> = states.iter().map(|state| state.generate_moves()).collect();
 
-    model.forward(&states, moves.legal_move_mask(device), device);
+    model.evaluate(&states, &moves, device);
 }
 
 /// Mean duration of `f` once its calls stop getting faster. GPU backends compile and autotune

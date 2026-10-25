@@ -1,6 +1,6 @@
 use crate::{
     chess::{moves::Move, Outcome, State},
-    engine::{model::TransformerModel, policy::LegalMoveMask},
+    engine::model::{Evaluation, TransformerModel},
 };
 use burn::{config::Config, tensor::backend::Backend};
 use rand::{
@@ -153,19 +153,21 @@ impl<'a, B: Backend> Mcts<'a, B> {
             return value;
         }
 
-        let legal_move_mask = [&moves].legal_move_mask(&self.device);
-        let (policy, value) = self.model.forward(&[state], legal_move_mask, &self.device);
+        let Evaluation { priors, value } = self
+            .model
+            .evaluate(&[state], &[&moves], &self.device)
+            .remove(0);
 
         self.nodes[idx].children = (self.nodes.len()..self.nodes.len() + moves.len()).collect();
 
-        moves.iter().for_each(|mv| {
-            let policy_index = mv.policy_index();
-            self.nodes.push(Node::new(Some(*mv), policy[policy_index]));
-        });
+        moves
+            .iter()
+            .zip(priors)
+            .for_each(|(mv, prior)| self.nodes.push(Node::new(Some(*mv), prior)));
 
-        self.nodes[idx].record_visit(value[0]);
+        self.nodes[idx].record_visit(value);
 
-        value[0]
+        value
     }
 }
 
