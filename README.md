@@ -47,9 +47,9 @@ The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter un
 
 ## Roadmap
 
+- [ ] Batched leaf evaluation on a GPU backend, in progress: see [docs/performance-plan.md](docs/performance-plan.md)
 - [ ] Self-play data generation
 - [ ] Training loop
-- [ ] Batched leaf evaluation on a GPU backend
 - [ ] UCI interface
 
 ## License
