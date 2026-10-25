@@ -7,6 +7,13 @@ use crate::chess::{
 };
 use arrayvec::ArrayVec;
 
+/// Result of a finished game, from the perspective of the side to move.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum Outcome {
+    Checkmate,
+    Draw,
+}
+
 #[derive(Clone)]
 struct UndoRecord {
     mv: Move,
@@ -466,6 +473,55 @@ impl State {
     }
 
     // ------------------------------------------------------------------------
+    // Game Outcome
+    // ------------------------------------------------------------------------
+
+    /// `moves` must be the legal moves of the current position.
+    pub(crate) fn outcome(&self, moves: &[Move]) -> Option<Outcome> {
+        if moves.is_empty() {
+            return Some(if self.is_in_check() {
+                Outcome::Checkmate
+            } else {
+                Outcome::Draw
+            });
+        }
+
+        let is_draw = self.halfmove_clock >= 100
+            || self.repetitions() >= 2
+            || self.is_insufficient_material();
+
+        is_draw.then_some(Outcome::Draw)
+    }
+
+    fn is_in_check(&self) -> bool {
+        self.board.move_gen_masks(self.turn).check_mask != Bitmask::FULL
+    }
+
+    /// Counts earlier occurrences of the current position. Only positions since the last
+    /// irreversible move can match, and only every other ply has the same side to move.
+    fn repetitions(&self) -> usize {
+        self.history
+            .iter()
+            .rev()
+            .take(self.halfmove_clock)
+            .skip(1)
+            .step_by(2)
+            .filter(|record| record.hash == self.hash)
+            .count()
+    }
+
+    /// Bare kings, or a single knight or bishop against a bare king.
+    fn is_insufficient_material(&self) -> bool {
+        let pieces = &self.board.pieces;
+        let pawns_and_majors = |color| {
+            pieces[Piece::pawn(color)] | pieces[Piece::rook(color)] | pieces[Piece::queen(color)]
+        };
+
+        (pawns_and_majors(Color::White) | pawns_and_majors(Color::Black)) == Bitmask::EMPTY
+            && self.board.occupancy.0.count_ones() <= 3
+    }
+
+    // ------------------------------------------------------------------------
     // Zobrist Hashing
     // ------------------------------------------------------------------------
 
@@ -581,5 +637,130 @@ mod tests {
     fn perft_depth_5() {
         let mut state = State::new();
         assert_eq!(state.perft(5), 4_865_609);
+    }
+
+    fn outcome_of(fen: &str) -> Option<Outcome> {
+        let state = State::from_fen(fen);
+        state.outcome(&state.generate_moves())
+    }
+
+    fn play(state: &mut State, moves: &[&str]) {
+        for uci in moves {
+            let mv = state
+                .generate_moves()
+                .into_iter()
+                .find(|mv| mv.to_string() == *uci)
+                .unwrap_or_else(|| panic!("illegal move {uci}"));
+            state.make_move(mv);
+        }
+    }
+
+    #[test]
+    fn outcome_start_position() {
+        assert_eq!(
+            outcome_of("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+            None
+        );
+    }
+
+    #[test]
+    fn outcome_checkmate() {
+        // Fool's mate: white is mated
+        assert_eq!(
+            outcome_of("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"),
+            Some(Outcome::Checkmate)
+        );
+        // Back rank: black is mated
+        assert_eq!(
+            outcome_of("R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1"),
+            Some(Outcome::Checkmate)
+        );
+    }
+
+    #[test]
+    fn outcome_check_is_not_checkmate() {
+        assert_eq!(outcome_of("4k3/8/8/8/8/8/8/R3K3 b - - 0 1"), None);
+        assert_eq!(outcome_of("R3k3/8/8/8/8/8/8/4K3 b - - 0 1"), None);
+    }
+
+    #[test]
+    fn outcome_stalemate() {
+        assert_eq!(
+            outcome_of("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1"),
+            Some(Outcome::Draw)
+        );
+    }
+
+    #[test]
+    fn outcome_fifty_move_rule() {
+        assert_eq!(outcome_of("8/8/8/4k3/8/8/4K3/4R3 w - - 99 80"), None);
+        assert_eq!(
+            outcome_of("8/8/8/4k3/8/8/4K3/4R3 w - - 100 80"),
+            Some(Outcome::Draw)
+        );
+    }
+
+    #[test]
+    fn outcome_checkmate_beats_fifty_move_rule() {
+        assert_eq!(
+            outcome_of("R5k1/5ppp/8/8/8/8/8/6K1 b - - 100 80"),
+            Some(Outcome::Checkmate)
+        );
+    }
+
+    #[test]
+    fn outcome_insufficient_material() {
+        assert_eq!(
+            outcome_of("8/8/8/4k3/8/8/4K3/8 w - - 0 1"),
+            Some(Outcome::Draw)
+        );
+        assert_eq!(
+            outcome_of("8/8/8/4k3/8/8/4K3/5N2 w - - 0 1"),
+            Some(Outcome::Draw)
+        );
+        assert_eq!(
+            outcome_of("8/8/8/4k3/8/8/4K3/5b2 w - - 0 1"),
+            Some(Outcome::Draw)
+        );
+        assert_eq!(outcome_of("8/8/8/4k3/8/8/4K3/4NN2 w - - 0 1"), None);
+        assert_eq!(outcome_of("8/8/8/4k3/8/8/4K3/4R3 w - - 0 1"), None);
+        assert_eq!(outcome_of("8/8/8/4k3/8/8/4KP2/8 w - - 0 1"), None);
+    }
+
+    #[test]
+    fn outcome_threefold_repetition() {
+        let shuffle = ["g1f3", "g8f6", "f3g1", "f6g8"];
+        let mut state = State::new();
+
+        play(&mut state, &shuffle);
+        assert_eq!(state.repetitions(), 1);
+        assert_eq!(state.outcome(&state.generate_moves()), None);
+
+        play(&mut state, &shuffle);
+        assert_eq!(state.repetitions(), 2);
+        assert_eq!(state.outcome(&state.generate_moves()), Some(Outcome::Draw));
+
+        state.unmake_move();
+        assert_eq!(state.outcome(&state.generate_moves()), None);
+    }
+
+    #[test]
+    fn repetition_requires_same_side_to_move() {
+        // White triangulates, so the starting placement returns with black to move
+        let mut state = State::from_fen("7k/8/8/8/8/8/7P/K7 w - - 0 1");
+        play(&mut state, &["a1b1", "h8g8", "b1b2", "g8h8", "b2a1"]);
+        assert_eq!(state.repetitions(), 0);
+    }
+
+    #[test]
+    fn repetition_requires_same_castling_rights() {
+        let shuffle = ["e1e2", "e8e7", "e2e1", "e7e8"];
+        let mut state = State::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+
+        play(&mut state, &shuffle);
+        assert_eq!(state.repetitions(), 0);
+
+        play(&mut state, &shuffle);
+        assert_eq!(state.repetitions(), 1);
     }
 }
