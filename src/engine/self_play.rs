@@ -3,6 +3,7 @@ use crate::{
     engine::{
         mcts::{MctsConfig, Search},
         model::{Evaluation, TransformerModel},
+        samples::Sample,
     },
 };
 use burn::{config::Config, tensor::backend::Backend};
@@ -72,6 +73,14 @@ struct Game {
     ply: usize,
     // Simulations in the searches already finished this game
     n_sims: usize,
+    // Positions played so far, waiting for the game's result
+    pending: Vec<PendingSample>,
+}
+
+struct PendingSample {
+    fen: String,
+    visits: Vec<(Move, u16)>,
+    turn: Color,
 }
 
 impl Game {
@@ -82,6 +91,7 @@ impl Game {
             rng: StdRng::seed_from_u64(seed),
             ply: 0,
             n_sims: 0,
+            pending: vec![],
         }
     }
 
@@ -90,11 +100,12 @@ impl Game {
         self.search.reset();
         self.ply = 0;
         self.n_sims = 0;
+        self.pending.clear();
     }
 
     /// Plays the move of each completed search until a search needs the network, leaving its
-    /// position pending. Returns the record instead if the game ends.
-    fn advance(&mut self, config: &SelfPlayConfig) -> Option<GameRecord> {
+    /// position pending. Returns the record and training samples instead if the game ends.
+    fn advance(&mut self, config: &SelfPlayConfig) -> Option<(GameRecord, Vec<Sample>)> {
         while !self.search.next_leaf(&mut self.state) {
             self.n_sims += self.search.n_sims_done();
             let temperature = if self.ply < config.sampling_plies {
@@ -102,20 +113,34 @@ impl Game {
             } else {
                 0.0
             };
-            let mv = self
-                .search
-                .result()
+            let search_result = self.search.result();
+            let mv = search_result
                 .sample_move(temperature, &mut self.rng)
                 .expect("only unfinished games are searched");
+
+            self.pending.push(PendingSample {
+                fen: self.state.to_fen(),
+                visits: search_result
+                    .visits
+                    .iter()
+                    .map(|&(mv, n_visits)| {
+                        let n_visits =
+                            u16::try_from(n_visits).expect("visit counts fit in 16 bits");
+                        (mv, n_visits)
+                    })
+                    .collect(),
+                turn: self.state.turn,
+            });
 
             self.state.make_move(mv);
             self.ply += 1;
 
             if let Some(result) = self.result(config) {
-                return Some(GameRecord {
+                let record = GameRecord {
                     result,
                     plies: self.ply,
-                });
+                };
+                return Some((record, self.take_samples(result)));
             }
 
             self.search.reset();
@@ -136,6 +161,28 @@ impl Game {
         self.search.apply(&mut self.state, evaluation);
     }
 
+    // Gives each position played the game's result for its side to move
+    fn take_samples(&mut self, result: GameResult) -> Vec<Sample> {
+        let winner = match result {
+            GameResult::WhiteWins => Some(Color::White),
+            GameResult::BlackWins => Some(Color::Black),
+            GameResult::Draw | GameResult::PlyLimit => None,
+        };
+
+        self.pending
+            .drain(..)
+            .map(|position| Sample {
+                fen: position.fen,
+                visits: position.visits,
+                result: match winner {
+                    None => 0,
+                    Some(color) if color == position.turn => 1,
+                    Some(_) => -1,
+                },
+            })
+            .collect()
+    }
+
     fn result(&self, config: &SelfPlayConfig) -> Option<GameResult> {
         match self.state.outcome(&self.state.generate_moves()) {
             Some(Outcome::Checkmate) => Some(match self.state.turn {
@@ -150,7 +197,8 @@ impl Game {
 
 /// Plays `n_games` games, `n_parallel` at a time. Each step, every game's search advances to a
 /// position that needs the network, all of those positions are evaluated in one batch, and each
-/// search takes in its result. `on_progress` is called every few seconds.
+/// search takes in its result. `on_game` receives each finished game with its training samples,
+/// and `on_progress` is called every few seconds. Games stopped at the ply limit count as draws.
 ///
 /// The tree work runs on one thread. It takes about 2% of each step, and a thread pool measured
 /// slower overall: dispatching thousands of microsecond tasks costs more than it saves, and even
@@ -160,6 +208,7 @@ pub(crate) fn run<B: Backend>(
     mcts_config: &MctsConfig,
     config: &SelfPlayConfig,
     device: &B::Device,
+    mut on_game: impl FnMut(&GameRecord, Vec<Sample>),
     mut on_progress: impl FnMut(&SelfPlayStats),
 ) -> SelfPlayStats {
     let start = Instant::now();
@@ -177,10 +226,11 @@ pub(crate) fn run<B: Backend>(
         let select_start = Instant::now();
         let mut i = 0;
         while i < games.len() {
-            let Some(record) = games[i].advance(config) else {
+            let Some((record, samples)) = games[i].advance(config) else {
                 i += 1;
                 continue;
             };
+            on_game(&record, samples);
             stats.games.push(record);
             finished_sims += games[i].n_sims;
 
@@ -273,7 +323,11 @@ mod tests {
             .init(&Default::default())
     }
 
-    fn play(model: &TransformerModel<NdArray>, seed: u64) -> SelfPlayStats {
+    // Returns the stats and each finished game with its samples
+    fn play(
+        model: &TransformerModel<NdArray>,
+        seed: u64,
+    ) -> (SelfPlayStats, Vec<(GameRecord, Vec<Sample>)>) {
         let mcts_config = MctsConfig::new().with_n_sims(8);
         // More games than slots, so finished games are replaced and then slots retired
         let config = SelfPlayConfig::new()
@@ -281,12 +335,21 @@ mod tests {
             .with_n_games(6)
             .with_max_plies(40)
             .with_seed(seed);
-        run(model, &mcts_config, &config, &Default::default(), |_| {})
+        let mut games = vec![];
+        let stats = run(
+            model,
+            &mcts_config,
+            &config,
+            &Default::default(),
+            |record, samples| games.push((record.clone(), samples)),
+            |_| {},
+        );
+        (stats, games)
     }
 
     #[test]
     fn every_game_finishes() {
-        let stats = play(&tiny_model(), 0);
+        let (stats, _) = play(&tiny_model(), 0);
 
         assert_eq!(stats.games.len(), 6);
         for record in &stats.games {
@@ -349,8 +412,54 @@ mod tests {
     }
 
     #[test]
+    fn every_move_becomes_a_sample() {
+        let (_, games) = play(&tiny_model(), 0);
+
+        for (record, samples) in &games {
+            assert_eq!(samples.len(), record.plies);
+            assert_eq!(samples[0].fen, State::new().to_fen());
+
+            for sample in samples {
+                // The search ran 8 simulations, and the first one expanded the root
+                let total_visits: u16 = sample.visits.iter().map(|(_, n)| n).sum();
+                assert_eq!(total_visits, 7);
+
+                // The FEN is the searched position, and its legal moves are all recorded
+                let state = State::from_fen(&sample.fen);
+                assert_eq!(state.to_fen(), sample.fen);
+                let moves: Vec<Move> = sample.visits.iter().map(|(mv, _)| *mv).collect();
+                assert_eq!(moves, state.generate_moves().as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn results_are_for_the_side_to_move() {
+        let results = |result| {
+            let mut game = Game::new(&MctsConfig::new(), 0);
+            for turn in [Color::White, Color::Black, Color::White] {
+                game.pending.push(PendingSample {
+                    fen: String::new(),
+                    visits: vec![],
+                    turn,
+                });
+            }
+            let samples = game.take_samples(result);
+            samples
+                .iter()
+                .map(|sample| sample.result)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(results(GameResult::WhiteWins), [1, -1, 1]);
+        assert_eq!(results(GameResult::BlackWins), [-1, 1, -1]);
+        assert_eq!(results(GameResult::Draw), [0, 0, 0]);
+        assert_eq!(results(GameResult::PlyLimit), [0, 0, 0]);
+    }
+
+    #[test]
     fn runs_with_the_same_seed_match() {
         let model = tiny_model();
-        assert_eq!(play(&model, 7).games, play(&model, 7).games);
+        assert_eq!(play(&model, 7).1, play(&model, 7).1);
     }
 }

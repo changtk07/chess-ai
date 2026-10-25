@@ -15,6 +15,8 @@ cargo test                       # move generation, game outcome, search and sel
 
 `self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, and applying its results.
 
+With `--out data/selfplay.bin`, each finished game's training samples are appended to that file: one per move played, with the position, every legal move's visit count from its search, and the game's result for the side to move. Games stopped at the ply limit count as draws. The format is described in `src/engine/samples.rs`.
+
 Commands run on the CPU by default. Add `--backend cuda` to run on an NVIDIA GPU, or `cuda-f16` / `cuda-bf16` for half precision, e.g. `cargo run --release -- bench 4096 --backend cuda-f16`. The first run on a GPU spends a minute or more compiling kernels.
 
 The CUDA backend needs the CUDA 13 toolkit, for its runtime compiler NVRTC. `.cargo/config.toml` pins cudarc to its CUDA 13.1 bindings, since cudarc 0.18 rejects newer 13.x toolkits. To check that the GPU computes the same results as the CPU:
@@ -52,11 +54,14 @@ The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter un
 
 - Many games run at once. Each step, every game's search advances to its next position needing the network, and all of those positions are evaluated in one batch on the GPU.
 - Moves are sampled by visit count for the first 30 plies, then chosen greedily. Each game has its own seeded random generator, so runs are reproducible.
+- Dirichlet noise (alpha 0.3, a quarter of each prior) is mixed into every search's root priors, so games explore moves the network rates low.
+- Every move played becomes a training sample, written out when its game ends.
 
 ## Roadmap
 
 - [x] Batched leaf evaluation on a GPU backend: see [docs/performance.md](docs/performance.md)
-- [ ] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples from continuous generation
+- [x] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples
+- [ ] Flip the board so the side to move is always at the bottom, before any weights are trained: the network then learns each pattern once instead of once per colour
 - [ ] Faster network, now about 98% of self-play time: flatten inputs to 2D before linear layers, look at attention, consider a smaller network
 - [ ] Reuse the search tree between moves
 - [ ] Training loop on the GPU

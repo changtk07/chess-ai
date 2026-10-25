@@ -7,6 +7,7 @@ use crate::{
     engine::{
         mcts::MctsConfig,
         model::TransformerModelConfig,
+        samples::SampleWriter,
         self_play::{self as self_play_driver, GameResult, SelfPlayConfig, SelfPlayStats},
     },
 };
@@ -14,14 +15,15 @@ use burn::{
     backend::{Cuda, NdArray},
     tensor::{backend::Backend, bf16, f16},
 };
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 const USAGE: &str = "\
 Usage: cinder <command> [--backend cpu|cuda|cuda-f16|cuda-bf16]
 
 Commands:
-  self-play [--parallel 256] [--sims 800] [--games 256] [--seed 0]
-                      play games with untrained weights, reporting throughput
+  self-play [--parallel 256] [--sims 800] [--games 256] [--seed 0] [--out file]
+                      play games with untrained weights, reporting throughput and
+                      appending each finished game's training samples to the file
   bench [max_batch]   network throughput by batch size, then search speed
   perft [depth]       count positions from the start, per root move";
 
@@ -70,6 +72,7 @@ fn perft(depth: u8) {
 
 fn self_play<B: Backend>(args: &[String], device: &B::Device) {
     let mut args = args.to_vec();
+    let out = take_option(&mut args, "--out");
     let mut option = |name: &str, default: usize| {
         take_option(&mut args, name).map_or(default, |value| value.parse().unwrap())
     };
@@ -77,6 +80,17 @@ fn self_play<B: Backend>(args: &[String], device: &B::Device) {
     let n_sims = option("--sims", 800);
     let n_games = option("--games", 256);
     let seed = option("--seed", 0);
+    assert!(
+        n_sims <= u16::MAX as usize,
+        "--sims can be at most {}, since samples store visit counts in 16 bits",
+        u16::MAX
+    );
+
+    let mut writer = out.as_deref().map(|path| {
+        SampleWriter::open(Path::new(path))
+            .unwrap_or_else(|error| panic!("can't write samples to {path}: {error}"))
+    });
+    let mut n_samples = 0;
 
     let model = TransformerModelConfig::new().init::<B>(device);
     let mcts_config = MctsConfig::new().with_n_sims(n_sims);
@@ -91,10 +105,22 @@ fn self_play<B: Backend>(args: &[String], device: &B::Device) {
     );
 
     let mut previous = SelfPlayStats::default();
-    let stats = self_play_driver::run(&model, &mcts_config, &config, device, |stats| {
-        print_progress(stats, &previous);
-        previous = stats.clone();
-    });
+    let stats = self_play_driver::run(
+        &model,
+        &mcts_config,
+        &config,
+        device,
+        |_, samples| {
+            if let Some(writer) = writer.as_mut() {
+                writer.write_game(&samples).expect("writing samples");
+                n_samples += samples.len();
+            }
+        },
+        |stats| {
+            print_progress(stats, &previous);
+            previous = stats.clone();
+        },
+    );
 
     let count = |result| {
         stats
@@ -115,6 +141,9 @@ fn self_play<B: Backend>(args: &[String], device: &B::Device) {
     );
     print!("Overall: ");
     print_progress(&stats, &SelfPlayStats::default());
+    if let Some(path) = out {
+        println!("{n_samples} samples appended to {path}");
+    }
 }
 
 // Rates over the interval since `previous`, and where that time went
