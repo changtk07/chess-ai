@@ -1,3 +1,4 @@
+mod bench;
 mod chess;
 mod engine;
 
@@ -21,6 +22,10 @@ fn main() {
 
     match args.get(1).map(String::as_str) {
         Some("perft") => perft(args.get(2).map_or(5, |depth| depth.parse().unwrap())),
+        Some("bench") => bench::run::<NdArray>(
+            &Default::default(),
+            args.get(2).map_or(256, |size| size.parse().unwrap()),
+        ),
         _ => self_play::<NdArray>(&Default::default()),
     }
 }

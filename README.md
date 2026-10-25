@@ -9,6 +9,7 @@ The network isn't trained yet. The engine plays complete, legal games, but with 
 ```sh
 cargo run --release              # play one self-play game with untrained weights
 cargo run --release -- perft 5   # count positions at depth 5 from the start, per root move
+cargo run --release -- bench     # network throughput by batch size (up to 256), and search speed
 cargo test                       # move generation, game outcome and search tests
 ```
 
