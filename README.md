@@ -55,10 +55,12 @@ The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter un
 
 ## Roadmap
 
-- [x] Batched leaf evaluation on a GPU backend: see [docs/performance-plan.md](docs/performance-plan.md)
-- [ ] Self-play data generation
-- [ ] Training loop
-- [ ] UCI interface
+- [x] Batched leaf evaluation on a GPU backend: see [docs/performance.md](docs/performance.md)
+- [ ] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples from continuous generation
+- [ ] Faster network, now about 98% of self-play time: flatten inputs to 2D before linear layers, look at attention, consider a smaller network
+- [ ] Reuse the search tree between moves
+- [ ] Training loop on the GPU
+- [ ] UCI interface, validating the positions it's given: `State::from_fen` accepts impossible positions, where the side not to move is in check
 
 ## License
 
