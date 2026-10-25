@@ -7,7 +7,7 @@ use rand::{
     distr::{weighted::WeightedIndex, Distribution},
     Rng,
 };
-use std::cmp::Ordering;
+use std::{cmp::Ordering, ops::Range};
 
 struct Node {
     mv: Option<Move>,
@@ -17,7 +17,9 @@ struct Node {
     prior: f32,
     // Exact value of a finished game, so the model is never asked to guess it
     terminal: Option<f32>,
-    children: Vec<usize>,
+    // Children are pushed together on expansion, so they occupy a contiguous range of nodes
+    first_child: u32,
+    n_children: u8,
 }
 
 impl Node {
@@ -28,8 +30,14 @@ impl Node {
             value_sum: 0.0,
             prior,
             terminal: None,
-            children: vec![],
+            first_child: 0,
+            n_children: 0,
         }
+    }
+
+    fn children(&self) -> Range<usize> {
+        let first = self.first_child as usize;
+        first..first + self.n_children as usize
     }
 
     fn q_val(&self) -> f32 {
@@ -96,9 +104,8 @@ impl<'a, B: Backend> Mcts<'a, B> {
         let root = &self.nodes[0];
         SearchResult {
             visits: root
-                .children
-                .iter()
-                .map(|&i| (self.nodes[i].mv.unwrap(), self.nodes[i].n_visits))
+                .children()
+                .map(|i| (self.nodes[i].mv.unwrap(), self.nodes[i].n_visits))
                 .collect(),
             value: root.q_val(),
         }
@@ -118,9 +125,7 @@ impl<'a, B: Backend> Mcts<'a, B> {
         let sqrt_parent_visits = (self.nodes[idx].n_visits as f32).sqrt();
 
         let chosen = self.nodes[idx]
-            .children
-            .iter()
-            .copied()
+            .children()
             .map(|i| {
                 (
                     i,
@@ -158,7 +163,8 @@ impl<'a, B: Backend> Mcts<'a, B> {
             .evaluate(&[state], &[&moves], &self.device)
             .remove(0);
 
-        self.nodes[idx].children = (self.nodes.len()..self.nodes.len() + moves.len()).collect();
+        self.nodes[idx].first_child = self.nodes.len() as u32;
+        self.nodes[idx].n_children = moves.len() as u8;
 
         moves
             .iter()
