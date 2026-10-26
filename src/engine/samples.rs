@@ -1,9 +1,20 @@
 //! Self-play training samples and their file format.
 //!
-//! A file starts with the bytes `CNDRSP` and a version byte. Each sample follows as a u8 FEN
-//! length and the FEN, the i8 result, a u8 move count, then each move's u16 bits and u16 visit
-//! count, little-endian. Moves are stored as moves rather than network policy indices, so the
-//! data stays valid if the network's move encoding changes.
+//! All numbers are little-endian. A file starts with the bytes `CNDRSP` and a version byte, then
+//! holds whole games:
+//!
+//! - **Game:** the u32 generation of the network that played it (0 for untrained weights), the
+//!   u16 number of samples, then the samples, one per move played.
+//! - **Sample:** the u8 length of the position's FEN, the FEN in ASCII, the game's result for the
+//!   side to move as an i8 (1 win, 0 draw, -1 loss), the u8 number of legal moves, then for each
+//!   legal move its u16 bits and the u16 visit count its search gave it.
+//! - **Move bits:** the from square in bits 10-15, the to square in bits 4-9 (squares numbered
+//!   a1 = 0, b1 = 1, ..., h8 = 63), and the move type in bits 0-3: 0 normal, 1 double pawn push,
+//!   2 en passant, 3-6 promotion to rook, knight, bishop or queen, 7 king-side castling, 8
+//!   queen-side castling.
+//!
+//! Moves are stored as moves rather than network policy indices, so the data stays valid if the
+//! network's move encoding changes.
 
 use crate::chess::moves::Move;
 use std::{
@@ -14,6 +25,9 @@ use std::{
 
 const MAGIC: &[u8; 6] = b"CNDRSP";
 const VERSION: u8 = 1;
+
+/// The generation recorded for games played with untrained weights
+pub(crate) const UNTRAINED: u32 = 0;
 
 /// One position from a self-play game, as a training target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,11 +68,14 @@ impl SampleWriter {
         Ok(Self { file })
     }
 
-    /// Appends one game's samples with a single write, so stopping the run, or another process
-    /// appending to the same file, doesn't split the game. A process killed during the write can
-    /// still cut it short; readers skip what's left of it.
-    pub(crate) fn write_game(&mut self, samples: &[Sample]) -> io::Result<()> {
+    /// Appends one game, played by network `generation`, with a single write, so stopping the run,
+    /// or another process appending to the same file, doesn't split the game. A process killed
+    /// during the write can still cut it short; readers skip what's left of it.
+    pub(crate) fn write_game(&mut self, generation: u32, samples: &[Sample]) -> io::Result<()> {
+        let n_samples = u16::try_from(samples.len()).expect("games are shorter than 65,536 plies");
         let mut bytes = vec![];
+        bytes.extend_from_slice(&generation.to_le_bytes());
+        bytes.extend_from_slice(&n_samples.to_le_bytes());
 
         for sample in samples {
             let fen = sample.fen.as_bytes();
@@ -76,15 +93,23 @@ impl SampleWriter {
     }
 }
 
+/// A game as stored in a sample file.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RecordedGame {
+    pub(crate) generation: u32,
+    pub(crate) samples: Vec<Sample>,
+}
+
 /// The contents of a sample file.
 #[cfg(test)]
 pub(crate) struct SampleFile {
-    pub(crate) samples: Vec<Sample>,
-    /// Bytes at the end that don't form a complete sample, left by a process killed mid-write
+    pub(crate) games: Vec<RecordedGame>,
+    /// Bytes at the end that don't form a complete game, left by a process killed mid-write
     pub(crate) truncated_bytes: usize,
 }
 
-/// Reads every sample in a file. The training loop will read data with this; for now it checks
+/// Reads every game in a file. The training loop will read data with this; for now it checks
 /// that the format round-trips.
 #[cfg(test)]
 pub(crate) fn read_samples(path: &Path) -> io::Result<SampleFile> {
@@ -100,14 +125,14 @@ pub(crate) fn read_samples(path: &Path) -> io::Result<SampleFile> {
         ));
     }
 
-    let mut samples = vec![];
+    let mut games = vec![];
     while !bytes.is_empty() {
         let remaining = bytes.len();
-        match read_sample(&mut bytes)? {
-            Some(sample) => samples.push(sample),
+        match read_game(&mut bytes)? {
+            Some(game) => games.push(game),
             None => {
                 return Ok(SampleFile {
-                    samples,
+                    games,
                     truncated_bytes: remaining,
                 })
             }
@@ -115,9 +140,30 @@ pub(crate) fn read_samples(path: &Path) -> io::Result<SampleFile> {
     }
 
     Ok(SampleFile {
-        samples,
+        games,
         truncated_bytes: 0,
     })
+}
+
+// Returns None if the bytes run out before the game ends
+#[cfg(test)]
+fn read_game(bytes: &mut &[u8]) -> io::Result<Option<RecordedGame>> {
+    let Some(&[g0, g1, g2, g3, n0, n1]) = take(bytes, 6) else {
+        return Ok(None);
+    };
+
+    let mut samples = vec![];
+    for _ in 0..u16::from_le_bytes([n0, n1]) {
+        let Some(sample) = read_sample(bytes)? else {
+            return Ok(None);
+        };
+        samples.push(sample);
+    }
+
+    Ok(Some(RecordedGame {
+        generation: u32::from_le_bytes([g0, g1, g2, g3]),
+        samples,
+    }))
 }
 
 // Returns None if the bytes run out before the sample ends
@@ -190,55 +236,71 @@ mod tests {
     }
 
     #[test]
-    fn samples_round_trip_across_appends() {
+    fn games_round_trip_across_appends() {
         let path = temp_path("round-trip");
-        let first_game = vec![
-            sample(
-                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                1,
-            ),
-            sample(
-                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
-                -1,
-            ),
-        ];
-        let second_game = vec![sample(
-            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
-            0,
-        )];
+        let first_game = RecordedGame {
+            generation: UNTRAINED,
+            samples: vec![
+                sample(
+                    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                    1,
+                ),
+                sample(
+                    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+                    -1,
+                ),
+            ],
+        };
+        let second_game = RecordedGame {
+            generation: 3,
+            samples: vec![sample(
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                0,
+            )],
+        };
 
         SampleWriter::open(&path)
             .unwrap()
-            .write_game(&first_game)
+            .write_game(first_game.generation, &first_game.samples)
             .unwrap();
         // A later run appends to the same file
         SampleWriter::open(&path)
             .unwrap()
-            .write_game(&second_game)
+            .write_game(second_game.generation, &second_game.samples)
             .unwrap();
 
-        let expected: Vec<Sample> = first_game.into_iter().chain(second_game).collect();
         let file = read_samples(&path).unwrap();
-        assert_eq!(file.samples, expected);
+        assert_eq!(file.games, [first_game, second_game]);
         assert_eq!(file.truncated_bytes, 0);
         fs::remove_file(&path).unwrap();
     }
 
     #[test]
-    fn a_cut_off_final_sample_is_skipped() {
+    fn a_cut_off_final_game_is_skipped() {
         let path = temp_path("cut-off");
-        let complete = vec![sample(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            1,
-        )];
+        let complete = RecordedGame {
+            generation: UNTRAINED,
+            samples: vec![sample(
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                1,
+            )],
+        };
         let mut writer = SampleWriter::open(&path).unwrap();
-        writer.write_game(&complete).unwrap();
+        writer
+            .write_game(complete.generation, &complete.samples)
+            .unwrap();
         let complete_len = fs::metadata(&path).unwrap().len();
         writer
-            .write_game(&[sample("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 0)])
+            .write_game(
+                UNTRAINED,
+                &[
+                    sample("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 0),
+                    sample("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1", 0),
+                ],
+            )
             .unwrap();
 
-        // As if the process were killed partway through writing the second game
+        // As if the process were killed during the second sample of the second game
         let full_len = fs::metadata(&path).unwrap().len();
         File::options()
             .write(true)
@@ -248,7 +310,7 @@ mod tests {
             .unwrap();
 
         let file = read_samples(&path).unwrap();
-        assert_eq!(file.samples, complete);
+        assert_eq!(file.games, [complete]);
         assert_eq!(file.truncated_bytes as u64, full_len - 3 - complete_len);
         fs::remove_file(&path).unwrap();
     }

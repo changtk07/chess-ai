@@ -7,7 +7,7 @@ use crate::{
     engine::{
         mcts::MctsConfig,
         model::TransformerModelConfig,
-        samples::SampleWriter,
+        samples::{SampleWriter, UNTRAINED},
         self_play::{self as self_play_driver, GameResult, SelfPlayConfig, SelfPlayStats},
     },
 };
@@ -157,7 +157,9 @@ fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
         device,
         |_, samples| {
             if let Some(writer) = writer.as_mut() {
-                writer.write_game(&samples).expect("writing samples");
+                writer
+                    .write_game(UNTRAINED, &samples)
+                    .expect("writing samples");
                 n_samples += samples.len();
             }
         },
