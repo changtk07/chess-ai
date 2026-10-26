@@ -25,7 +25,7 @@ The CUDA backend needs the CUDA 13 toolkit, for its runtime compiler NVRTC. `.ca
 cargo test --release -- --ignored
 ```
 
-The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter under WSL2.
+burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the GPU path is CUDA.
 
 ## How it works
 
