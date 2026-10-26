@@ -61,11 +61,28 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 
 - [x] Batched leaf evaluation on a GPU backend: see [docs/performance.md](docs/performance.md)
 - [x] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples
-- [ ] Flip the board so the side to move is always at the bottom, before any weights are trained: the network then learns each pattern once instead of once per colour
-- [ ] Faster network, now about 98% of self-play time: flatten inputs to 2D before linear layers, look at attention, consider a smaller network
-- [ ] Reuse the search tree between moves
+- [ ] Network changes, all before any weights are trained:
+  - Move the network's input encoding next to the move encoding in `policy.rs`, so the board flip changes both consistently and training can encode samples without a forward pass.
+  - Flip the board so the side to move is always at the bottom: the network then learns each pattern once instead of once per colour.
+  - Add a final `RmsNorm` before the policy and value heads. The blocks normalize their inputs, so the residual stream otherwise reaches the heads unnormalized.
+  - Set attention dropout deliberately: burn defaults it to 0.1, which only takes effect once training runs.
+- [ ] Faster network, now about 98% of self-play time:
+  - Flatten inputs to 2D before linear layers: burn's 3D form runs at about half the speed of a 2D matrix multiply.
+  - Look at attention, and consider a smaller network.
+- [ ] Reuse the search tree between moves:
+  - First measure how many of each search's visits the chosen move's subtree holds: that's the share of evaluations reuse would save.
+  - A reused root is already expanded, so noise must be mixed into its existing priors. Decide whether `--sims` means new simulations per move or total visits at the root, since samples record visits.
+  - Caching evaluations by Zobrist hash and halfmove clock is an alternative or a complement.
 - [ ] Training loop on the GPU
-- [ ] UCI interface, validating the positions it's given: `State::from_fen` accepts impossible positions, where the side not to move is in check
+- [ ] Once the network is trained, score unvisited moves with first-play urgency (the parent's value minus a reduction, as Leela does) instead of as draws.
+- [ ] UCI interface:
+  - Print promotions as `a7a8q` rather than `a7a8=q`, together with the `play()` test helper, which matches moves by that string.
+  - Validate the positions it's given: `State::from_fen` accepts impossible positions, where the side not to move is in check, and `Position::from_fen` panics on malformed squares.
+- [ ] Cleanups, when convenient:
+  - Merge the four promotion helpers and the two castling helpers in `State::make_move`, checked with perft.
+  - Share one ray-attack helper between the rook and bishop attack masks and the pin and check masks, checking that perft 5 isn't slower.
+  - Shrink search tree nodes from 40 to 24 bytes, with `u32` visit counts and a flag for finished games. Only needed for much larger `--parallel`.
+  - Maybe set the en passant square only when a capture is possible. Today it's set after every double push, so a repetition can be detected up to a move late, and the network sees a flag that changes nothing.
 
 ## License
 
