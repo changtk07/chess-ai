@@ -66,8 +66,12 @@ impl Node {
 
 #[derive(Config, Debug)]
 pub(crate) struct MctsConfig {
+    /// How strongly selection favours moves with high priors and few visits over moves with good
+    /// results so far
     #[config(default = 1.5)]
     c_puct: f32,
+    /// Simulations per search. The first one expands the root, so the root's moves get
+    /// `n_sims - 1` visits in total.
     #[config(default = 800)]
     n_sims: usize,
 }
