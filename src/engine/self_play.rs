@@ -63,6 +63,8 @@ pub(crate) struct SelfPlayStats {
     pub(crate) select_time: Duration,
     pub(crate) evaluate_time: Duration,
     pub(crate) apply_time: Duration,
+    /// Time in `on_game`, such as writing samples, kept out of `select_time`
+    pub(crate) on_game_time: Duration,
 }
 
 struct Game {
@@ -225,13 +227,16 @@ pub(crate) fn run<B: Backend>(
 
     loop {
         let select_start = Instant::now();
+        let mut on_game_time = Duration::ZERO;
         let mut i = 0;
         while i < games.len() {
             let Some((record, samples)) = games[i].advance(config) else {
                 i += 1;
                 continue;
             };
+            let on_game_start = Instant::now();
             on_game(&record, samples);
+            on_game_time += on_game_start.elapsed();
             stats.games.push(record);
             finished_sims += games[i].n_sims;
 
@@ -250,7 +255,8 @@ pub(crate) fn run<B: Backend>(
             );
             i += 1;
         }
-        stats.select_time += select_start.elapsed();
+        stats.select_time += select_start.elapsed() - on_game_time;
+        stats.on_game_time += on_game_time;
 
         if games.is_empty() {
             break;

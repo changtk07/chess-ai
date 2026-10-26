@@ -204,7 +204,7 @@ fn print_progress(current: &SelfPlayStats, previous: &SelfPlayStats) {
 
     println!(
         "{:>5.0}s  games {:>4}  {:>6.0} sims/s  {:>6.0} evals/s  batch {:>5.1}  \
-         time: select {:>4.1}%, network {:>4.1}%, apply {:>4.1}%",
+         time: select {:>4.1}%, network {:>4.1}%, apply {:>4.1}%, write {:>4.1}%",
         current.elapsed.as_secs_f64(),
         current.games.len(),
         (current.n_sims - previous.n_sims) as f64 / seconds,
@@ -213,5 +213,6 @@ fn print_progress(current: &SelfPlayStats, previous: &SelfPlayStats) {
         share(current.select_time, previous.select_time),
         share(current.evaluate_time, previous.evaluate_time),
         share(current.apply_time, previous.apply_time),
+        share(current.on_game_time, previous.on_game_time),
     );
 }
