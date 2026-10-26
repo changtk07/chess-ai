@@ -53,7 +53,7 @@ The wgpu backend is also enabled in `Cargo.toml`, but finds no Vulkan adapter un
 **Self-play** (`src/engine/self_play.rs`)
 
 - Many games run at once. Each step, every game's search advances to its next position needing the network, and all of those positions are evaluated in one batch on the GPU.
-- Moves are sampled by visit count for the first 30 plies, then chosen greedily. Each game has its own seeded random generator, so runs are reproducible.
+- Moves are sampled by visit count for the first 30 plies, then chosen greedily. `--seed` fixes the untrained network's weights and seeds every game's own random generator, so runs with the same seed write the same samples, on the GPU as well.
 - Dirichlet noise (alpha 0.3, a quarter of each prior) is mixed into every search's root priors, so games explore moves the network rates low.
 - Every move played becomes a training sample, written out when its game ends.
 

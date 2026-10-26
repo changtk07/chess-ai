@@ -32,6 +32,7 @@ pub(crate) struct SelfPlayConfig {
     noise_alpha: f32,
     #[config(default = 0.25)]
     noise_fraction: f32,
+    /// Seeds one generator that seeds each slot's own, so no two slots or seeds share a stream
     #[config(default = 0)]
     seed: u64,
 }
@@ -216,8 +217,9 @@ pub(crate) fn run<B: Backend>(
     let mut stats = SelfPlayStats::default();
 
     let n_slots = config.n_parallel.min(config.n_games);
+    let mut seeds = StdRng::seed_from_u64(config.seed);
     let mut games: Vec<Game> = (0..n_slots)
-        .map(|i| Game::new(mcts_config, config.seed + i as u64))
+        .map(|_| Game::new(mcts_config, seeds.random()))
         .collect();
     let mut n_started = n_slots;
     let mut finished_sims = 0;
@@ -461,5 +463,24 @@ mod tests {
     fn runs_with_the_same_seed_match() {
         let model = tiny_model();
         assert_eq!(play(&model, 7).1, play(&model, 7).1);
+    }
+
+    #[test]
+    fn different_seeds_play_different_games() {
+        let model = tiny_model();
+        let first_games = |seed| {
+            let (_, games) = play(&model, seed);
+            games
+                .into_iter()
+                .map(|(_, samples)| samples)
+                .collect::<Vec<_>>()
+        };
+
+        // Neighbouring seeds once shared all but one slot's games
+        let seed_0 = first_games(0);
+        let seed_1 = first_games(1);
+        for game in &seed_1 {
+            assert!(!seed_0.contains(game));
+        }
     }
 }

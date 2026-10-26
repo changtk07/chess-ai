@@ -92,6 +92,8 @@ fn self_play<B: Backend>(args: &[String], device: &B::Device) {
     });
     let mut n_samples = 0;
 
+    // Until weights can be loaded from a file, the seed also fixes the random initial weights
+    B::seed(device, seed as u64);
     let model = TransformerModelConfig::new().init::<B>(device);
     let mcts_config = MctsConfig::new().with_n_sims(n_sims);
     let config = SelfPlayConfig::new()
