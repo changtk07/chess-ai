@@ -15,7 +15,7 @@ use burn::{
     backend::{Cuda, NdArray},
     tensor::{backend::Backend, bf16, f16},
 };
-use std::{path::Path, time::Instant};
+use std::{path::Path, str::FromStr, time::Instant};
 
 const USAGE: &str = "\
 Usage: cinder <command> [--backend cpu|cuda|cuda-f16|cuda-bf16]
@@ -32,23 +32,33 @@ fn main() {
     let backend = take_option(&mut args, "--backend").unwrap_or_else(|| "cpu".into());
 
     match backend.as_str() {
-        "cpu" => run::<NdArray>(&args, &Default::default()),
-        "cuda" => run::<Cuda>(&args, &Default::default()),
-        "cuda-f16" => run::<Cuda<f16>>(&args, &Default::default()),
-        "cuda-bf16" => run::<Cuda<bf16>>(&args, &Default::default()),
-        other => panic!("unknown backend {other}, expected cpu, cuda, cuda-f16 or cuda-bf16"),
+        "cpu" => run::<NdArray>(args, &Default::default()),
+        "cuda" => run::<Cuda>(args, &Default::default()),
+        "cuda-f16" => run::<Cuda<f16>>(args, &Default::default()),
+        "cuda-bf16" => run::<Cuda<bf16>>(args, &Default::default()),
+        other => usage_error(&format!("unknown backend {other}")),
     }
 }
 
-fn run<B: Backend>(args: &[String], device: &B::Device) {
-    match args.first().map(String::as_str) {
-        Some("perft") => perft(args.get(1).map_or(5, |depth| depth.parse().unwrap())),
-        Some("bench") => bench::run::<B>(
-            device,
-            args.get(1).map_or(256, |size| size.parse().unwrap()),
-        ),
-        Some("self-play") => self_play::<B>(&args[1..], device),
-        _ => println!("{USAGE}"),
+fn run<B: Backend>(mut args: Vec<String>, device: &B::Device) {
+    if args.is_empty() {
+        println!("{USAGE}");
+        return;
+    }
+
+    match args.remove(0).as_str() {
+        "perft" => {
+            let depth = take_positional(&mut args, "depth", 5);
+            reject_leftovers(&args);
+            perft(depth);
+        }
+        "bench" => {
+            let max_batch_size = take_positional(&mut args, "max_batch", 256);
+            reject_leftovers(&args);
+            bench::run::<B>(device, max_batch_size);
+        }
+        "self-play" => self_play::<B>(args, device),
+        other => usage_error(&format!("unknown command {other}")),
     }
 }
 
@@ -56,7 +66,40 @@ fn run<B: Backend>(args: &[String], device: &B::Device) {
 fn take_option(args: &mut Vec<String>, name: &str) -> Option<String> {
     let index = args.iter().position(|arg| arg == name)?;
     args.remove(index);
-    (index < args.len()).then(|| args.remove(index))
+
+    match args.get(index) {
+        Some(value) if !value.starts_with("--") => Some(args.remove(index)),
+        _ => usage_error(&format!("{name} needs a value")),
+    }
+}
+
+fn take_parsed_option<T: FromStr>(args: &mut Vec<String>, name: &str, default: T) -> T {
+    take_option(args, name).map_or(default, |value| parse(name, &value))
+}
+
+// Takes the first argument if it isn't an option
+fn take_positional<T: FromStr>(args: &mut Vec<String>, name: &str, default: T) -> T {
+    match args.first() {
+        Some(value) if !value.starts_with("--") => parse(name, &args.remove(0)),
+        _ => default,
+    }
+}
+
+fn parse<T: FromStr>(name: &str, value: &str) -> T {
+    value
+        .parse()
+        .unwrap_or_else(|_| usage_error(&format!("{name} expects a number, got {value}")))
+}
+
+fn reject_leftovers(args: &[String]) {
+    if !args.is_empty() {
+        usage_error(&format!("unexpected arguments: {}", args.join(" ")));
+    }
+}
+
+fn usage_error(message: &str) -> ! {
+    eprintln!("error: {message}\n\n{USAGE}");
+    std::process::exit(2);
 }
 
 fn perft(depth: u8) {
@@ -70,21 +113,21 @@ fn perft(depth: u8) {
     println!("Time taken: {:?}", elapsed);
 }
 
-fn self_play<B: Backend>(args: &[String], device: &B::Device) {
-    let mut args = args.to_vec();
+fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
     let out = take_option(&mut args, "--out");
-    let mut option = |name: &str, default: usize| {
-        take_option(&mut args, name).map_or(default, |value| value.parse().unwrap())
-    };
-    let n_parallel = option("--parallel", 256);
-    let n_sims = option("--sims", 800);
-    let n_games = option("--games", 256);
-    let seed = option("--seed", 0);
-    assert!(
-        n_sims <= u16::MAX as usize,
-        "--sims can be at most {}, since samples store visit counts in 16 bits",
-        u16::MAX
-    );
+    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 256);
+    let n_sims: usize = take_parsed_option(&mut args, "--sims", 800);
+    let n_games: usize = take_parsed_option(&mut args, "--games", 256);
+    let seed: u64 = take_parsed_option(&mut args, "--seed", 0);
+    reject_leftovers(&args);
+
+    if n_parallel == 0 || n_games == 0 {
+        usage_error("--parallel and --games must be at least 1");
+    }
+    // The first simulation only expands the root, and samples store visit counts in 16 bits
+    if !(2..=u16::MAX as usize).contains(&n_sims) {
+        usage_error(&format!("--sims must be from 2 to {}", u16::MAX));
+    }
 
     let mut writer = out.as_deref().map(|path| {
         SampleWriter::open(Path::new(path))
@@ -93,13 +136,13 @@ fn self_play<B: Backend>(args: &[String], device: &B::Device) {
     let mut n_samples = 0;
 
     // Until weights can be loaded from a file, the seed also fixes the random initial weights
-    B::seed(device, seed as u64);
+    B::seed(device, seed);
     let model = TransformerModelConfig::new().init::<B>(device);
     let mcts_config = MctsConfig::new().with_n_sims(n_sims);
     let config = SelfPlayConfig::new()
         .with_n_parallel(n_parallel)
         .with_n_games(n_games)
-        .with_seed(seed as u64);
+        .with_seed(seed);
 
     println!(
         "Backend: {}, {n_parallel} games at a time, {n_sims} simulations per move",
