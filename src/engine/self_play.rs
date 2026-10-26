@@ -54,8 +54,7 @@ pub(crate) struct GameRecord {
 #[derive(Clone, Default)]
 pub(crate) struct SelfPlayStats {
     pub(crate) games: Vec<GameRecord>,
-    /// Moves played and simulations run, including in games still going
-    pub(crate) n_moves: usize,
+    /// Simulations run, including in games still going
     pub(crate) n_sims: usize,
     pub(crate) n_evaluations: usize,
     /// Batched evaluations, one per step
@@ -298,10 +297,6 @@ fn add_noise(priors: &mut [f32], alpha: f32, fraction: f32, rng: &mut impl Rng) 
 }
 
 fn update_totals(stats: &mut SelfPlayStats, games: &[Game], finished_sims: usize, start: Instant) {
-    let finished_moves: usize = stats.games.iter().map(|record| record.plies).sum();
-    let ongoing_moves: usize = games.iter().map(|game| game.ply).sum();
-    stats.n_moves = finished_moves + ongoing_moves;
-
     let ongoing_sims: usize = games
         .iter()
         .map(|game| game.n_sims + game.search.n_sims_done())
@@ -356,7 +351,6 @@ mod tests {
 
         // Every move came from a complete search of 8 simulations
         let total_plies: usize = stats.games.iter().map(|record| record.plies).sum();
-        assert_eq!(stats.n_moves, total_plies);
         assert_eq!(stats.n_sims, total_plies * 8);
         // Each step evaluates one position per game still going, never more than the slots
         assert!(stats.n_steps <= stats.n_evaluations);
