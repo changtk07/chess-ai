@@ -314,16 +314,8 @@ fn update_totals(stats: &mut SelfPlayStats, games: &[Game], finished_sims: usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::model::TransformerModelConfig;
+    use crate::engine::model::tiny_model;
     use burn::backend::NdArray;
-
-    fn tiny_model() -> TransformerModel<NdArray> {
-        TransformerModelConfig::new()
-            .with_n_blocks(1)
-            .with_n_heads(2)
-            .with_head_dimension(16)
-            .init(&Default::default())
-    }
 
     // Returns the stats and each finished game with its samples
     fn play(

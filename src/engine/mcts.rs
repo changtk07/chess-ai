@@ -301,19 +301,8 @@ impl SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::model::TransformerModelConfig;
-    use burn::backend::NdArray;
+    use crate::{chess::state::START_FEN, engine::model::tiny_model};
     use rand::{rngs::StdRng, SeedableRng};
-
-    const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-
-    fn tiny_model() -> TransformerModel<NdArray> {
-        TransformerModelConfig::new()
-            .with_n_blocks(1)
-            .with_n_heads(2)
-            .with_head_dimension(16)
-            .init(&Default::default())
-    }
 
     fn search(state: &mut State, n_sims: usize) -> SearchResult {
         let model = tiny_model();

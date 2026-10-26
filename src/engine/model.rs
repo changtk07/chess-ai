@@ -295,9 +295,21 @@ impl TransformerModelConfig {
     }
 }
 
+/// A one-block network that keeps CPU tests fast. Untrained, its outputs serve as well as any to
+/// test the code around it.
+#[cfg(test)]
+pub(crate) fn tiny_model() -> TransformerModel<burn::backend::NdArray> {
+    TransformerModelConfig::new()
+        .with_n_blocks(1)
+        .with_n_heads(2)
+        .with_head_dimension(16)
+        .init(&Default::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chess::state::START_FEN;
     use burn::{
         backend::{Cuda, NdArray},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
@@ -305,7 +317,7 @@ mod tests {
     };
 
     const FENS: [&str; 3] = [
-        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        START_FEN,
         "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
         "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
     ];
@@ -326,14 +338,6 @@ mod tests {
         let priors = evaluations.iter().flat_map(|e| e.priors.clone()).collect();
         let values = evaluations.iter().map(|e| e.value).collect();
         (priors, values)
-    }
-
-    fn tiny_model() -> TransformerModel<NdArray> {
-        TransformerModelConfig::new()
-            .with_n_blocks(1)
-            .with_n_heads(2)
-            .with_head_dimension(16)
-            .init(&Default::default())
     }
 
     // The positions have 20, 48 and 6 legal moves, so the shorter rows are padded

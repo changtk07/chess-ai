@@ -211,6 +211,7 @@ fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chess::state::START_FEN;
     use crate::chess::State;
     use std::path::PathBuf;
 
@@ -241,10 +242,7 @@ mod tests {
         let first_game = RecordedGame {
             generation: UNTRAINED,
             samples: vec![
-                sample(
-                    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                    1,
-                ),
+                sample(START_FEN, 1),
                 sample(
                     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
                     -1,
@@ -280,10 +278,7 @@ mod tests {
         let path = temp_path("cut-off");
         let complete = RecordedGame {
             generation: UNTRAINED,
-            samples: vec![sample(
-                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                1,
-            )],
+            samples: vec![sample(START_FEN, 1)],
         };
         let mut writer = SampleWriter::open(&path).unwrap();
         writer

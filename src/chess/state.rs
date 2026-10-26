@@ -7,7 +7,7 @@ use crate::chess::{
 };
 use arrayvec::ArrayVec;
 
-const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+pub(crate) const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 /// Result of a finished game, from the perspective of the side to move.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -668,10 +668,7 @@ mod tests {
 
     #[test]
     fn outcome_start_position() {
-        assert_eq!(
-            outcome_of("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
-            None
-        );
+        assert_eq!(outcome_of(START_FEN), None);
     }
 
     #[test]
@@ -741,7 +738,7 @@ mod tests {
     #[test]
     fn fen_round_trips() {
         for fen in [
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            START_FEN,
             "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
             "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
             "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
