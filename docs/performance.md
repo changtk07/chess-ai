@@ -46,6 +46,8 @@ Positions/s on an idle GPU, covering input encoding, the forward pass and readba
 
 Largest difference from the CPU, for the same weights, in policy or value (the GPU tests in `model.rs`): f32 6e-5, f16 5e-4, bf16 3e-3.
 
+Re-measured on 2026-10-26 at `418e42c`, two runs: bf16 gave 15,027 and 15,270 at batch 256, and 15,329 and 15,418 at 1,024. That's a few percent under the table, with no network code changed in between, so treat differences of that size as run-to-run variation.
+
 ### Self-play
 
 `cinder self-play --sims 800 --backend cuda-bf16`. Steady-state simulations/s, averaged over 5-second reports after kernel compilation:
@@ -57,6 +59,8 @@ Largest difference from the CPU, for the same weights, in policy or value (the G
 | 1,024 | 14,533 | 15,344 |
 
 On one thread, the network takes about 98% of each step and the tree work about 2%.
+
+Re-measured on 2026-10-26 at `418e42c`, after root noise and sample recording were added: 256 games averaged 15,331 simulations/s (14,804-15,502) with `--out` writing samples. The network took 98.2% of each step and writing samples about 0%, so neither feature costs measurable throughput.
 
 With a fixed `--games`, batches shrink as the last games finish, and those games run at near single-position speed. Continuous generation avoids this.
 
