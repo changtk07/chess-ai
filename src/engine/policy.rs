@@ -10,9 +10,9 @@ use burn::{
 pub(crate) const N_MOVE_PLANES: usize = 73;
 const MAX_RAY_MOVE_DIST: usize = 7;
 const KNIGHT_MOVE_PLANE_START: usize = 56;
-const KNIGHT_PROMO_CENTER_OFFSET: i8 = 64;
-const BISHOP_PROMO_CENTER_OFFSET: i8 = 67;
-const ROOK_PROMO_CENTER_OFFSET: i8 = 70;
+const KNIGHT_PROMO_PLANE_START: i8 = 64;
+const BISHOP_PROMO_PLANE_START: i8 = 67;
+const ROOK_PROMO_PLANE_START: i8 = 70;
 
 impl Move {
     pub(crate) fn policy_index(&self) -> usize {
@@ -25,13 +25,13 @@ impl Move {
 
         match mv_type {
             MoveType::PromotionKnight => {
-                return base + (KNIGHT_PROMO_CENTER_OFFSET + file_diff + 1) as usize
+                return base + (KNIGHT_PROMO_PLANE_START + file_diff + 1) as usize
             }
             MoveType::PromotionBishop => {
-                return base + (BISHOP_PROMO_CENTER_OFFSET + file_diff + 1) as usize
+                return base + (BISHOP_PROMO_PLANE_START + file_diff + 1) as usize
             }
             MoveType::PromotionRook => {
-                return base + (ROOK_PROMO_CENTER_OFFSET + file_diff + 1) as usize
+                return base + (ROOK_PROMO_PLANE_START + file_diff + 1) as usize
             }
             _ => (),
         };
