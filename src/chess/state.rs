@@ -7,6 +7,8 @@ use crate::chess::{
 };
 use arrayvec::ArrayVec;
 
+const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
 /// Result of a finished game, from the perspective of the side to move.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) enum Outcome {
@@ -37,18 +39,7 @@ pub struct State {
 
 impl State {
     pub fn new() -> Self {
-        let mut state = Self {
-            board: Board::new(),
-            turn: Color::White,
-            en_passant: None,
-            castling_rights: CastlingRights::new(),
-            fullmove_number: 1,
-            halfmove_clock: 0,
-            hash: 0,
-            history: Vec::with_capacity(64),
-        };
-        state.generate_hash();
-        state
+        Self::from_fen(START_FEN)
     }
 
     pub fn from_fen(fen: &str) -> Self {

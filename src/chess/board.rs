@@ -32,10 +32,6 @@ impl CastlingRights {
         14, 15, 15, 15, 12, 15, 15, 13, // 56-63
     ];
 
-    pub(crate) const fn new() -> Self {
-        Self(0b1111)
-    }
-
     pub(crate) fn from_fen(fen: &str) -> Self {
         let mut bits = 0u8;
         fen.chars().for_each(|c| match c {
@@ -126,93 +122,6 @@ pub(crate) struct Board {
 }
 
 impl Board {
-    pub(crate) fn new() -> Self {
-        Self {
-            pieces: [
-                Bitmask(0x000000000000FF00), // White Pawns
-                Bitmask(0x0000000000000081), // White Rooks
-                Bitmask(0x0000000000000042), // White Knights
-                Bitmask(0x0000000000000024), // White Bishops
-                Bitmask(0x0000000000000008), // White Queens
-                Bitmask(0x0000000000000010), // White Kings
-                Bitmask(0x00FF000000000000), // Black Pawns
-                Bitmask(0x8100000000000000), // Black Rooks
-                Bitmask(0x4200000000000000), // Black Knights
-                Bitmask(0x2400000000000000), // Black Bishops
-                Bitmask(0x0800000000000000), // Black Queens
-                Bitmask(0x1000000000000000), // Black Kings
-            ],
-            mailbox: [
-                Some(Piece::WhiteRook),
-                Some(Piece::WhiteKnight),
-                Some(Piece::WhiteBishop),
-                Some(Piece::WhiteQueen),
-                Some(Piece::WhiteKing),
-                Some(Piece::WhiteBishop),
-                Some(Piece::WhiteKnight),
-                Some(Piece::WhiteRook),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                Some(Piece::WhitePawn),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackPawn),
-                Some(Piece::BlackRook),
-                Some(Piece::BlackKnight),
-                Some(Piece::BlackBishop),
-                Some(Piece::BlackQueen),
-                Some(Piece::BlackKing),
-                Some(Piece::BlackBishop),
-                Some(Piece::BlackKnight),
-                Some(Piece::BlackRook),
-            ],
-            colors: [Bitmask(0x000000000000FFFF), Bitmask(0xFFFF000000000000)],
-            occupancy: Bitmask(0xFFFF00000000FFFF),
-        }
-    }
-
     pub(crate) fn from_fen(fen: &str) -> Self {
         let mut board = Self {
             pieces: [Bitmask::EMPTY; 12],
