@@ -117,6 +117,8 @@ Self-play simulations/s on the laptop with 64 tokens, `--backend cuda-bf16`, fro
 | 8 × 384 | 13,889 | 12,974 |
 | 10 × 384 | 10,173 | 10,188 |
 
+`scripts/bench-sizes.sh` repeats this measurement on any machine, averaging all reports after the first two instead.
+
 From 8 blocks up, time grows about in proportion to the number of blocks. Below that, the work outside the blocks stops shrinking: 6 blocks gained only 5–10% over 8, with the network still about 93% of each step. 512 games helped the smaller networks and made no difference to the larger ones. Runs differ by up to about 10% on the laptop, so treat smaller gaps as noise.
 
 ## CPU parallelism

@@ -65,13 +65,16 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 - [x] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples
 - [x] Network changes before any weights are trained: inputs encoded apart from the network in `src/engine/encoding.rs`, the board seen from the side to move, a final RMSNorm before the heads, and attention dropout off
 - [ ] Faster network, now about 98% of self-play time:
-  - [x] 2D linear layers and a fused query/key/value projection: self-play about 1.7× faster on the laptop. Re-measure on the 4090.
-  - Look at the attention core, still about 60% of attention time, and consider a smaller network.
+  - [x] 2D linear layers and a fused query/key/value projection: self-play about 1.7× faster on the laptop.
+  - [x] 64 tokens instead of 65: about 25% faster again at the current size, more at smaller ones.
+  - [ ] Choose a default network size that suits both the RTX 4090 desktop and the RTX 5080 laptop. Both must use the same size, since training will move between them, but each can play its own number of games at once. On the laptop, 8 blocks of width 256 at 512 games is twice as fast as today's 8 × 384, and fewer than 8 blocks barely helps (`docs/performance.md`, "Network size"). Run `scripts/bench-sizes.sh` on the desktop (about 40 minutes), add its numbers to the notes, then set the default size and each machine's best `--parallel`.
+  - Maybe: attention's matrix multiplies, a thousand or more tiny products per call, still run far below the GPU's speed.
 - [ ] Reuse the search tree between moves:
   - First measure how many of each search's visits the chosen move's subtree holds: that's the share of evaluations reuse would save.
   - A reused root is already expanded, so noise must be mixed into its existing priors. Decide whether `--sims` means new simulations per move or total visits at the root, since samples record visits.
   - Caching evaluations by Zobrist hash and halfmove clock is an alternative or a complement.
-- [ ] Training loop on the GPU
+- [ ] Training loop on the GPU:
+  - Training must pause on one machine and resume on the other. Checkpoints hold everything needed to continue (weights, optimizer state, step count, network size and position in the sample data), don't depend on the backend, precision or batch size they were saved with, and use no absolute paths.
 - [ ] Once the network is trained, score unvisited moves with first-play urgency (the parent's value minus a reduction, as Leela does) instead of as draws.
 - [ ] UCI interface:
   - Print promotions as `a7a8q` rather than `a7a8=q`, together with the `play()` test helper, which matches moves by that string.
