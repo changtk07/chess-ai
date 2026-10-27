@@ -20,8 +20,9 @@ The work is in the commits from `feat: add bench command for network and search 
 - **Batches across games.** The GPU costs at least about 7.7 ms per call, the same for 1 position as for 16, because of kernel launches, synchronization and WSL. A single search sends one position per call, so `self-play` keeps 256 games going and evaluates one position from each in a single call.
 - **Pausable search.** `Search::next_leaf` runs simulations until one reaches a position the network must evaluate, and leaves the state there. `Search::apply` takes the network's output, backs the value up and returns the state to the root. Finished games are scored without the network.
 - **Legal moves only.** Each position's legal-move indices are uploaded, padded to the batch's largest move count. The policy head picks out just those logits on the GPU, and priors and values come back in one small transfer, instead of all 4,672 moves per position.
+- **64 tokens.** Castling rights, en passant file and the halfmove clock are added into every square's token rather than given a token of their own, since attention over 64 tokens runs far faster than over 65.
 - **One upload per input.** A batch's inputs are built in single host buffers. Per-position tensors stall burn's fusion optimizer (see the pitfalls below).
-- **2D matrix multiplies.** The blocks keep every position's tokens stacked in one `[batch × 65, 384]` matrix, because burn runs `Linear` on 3D inputs well below the speed of the 2D form. Attention reshapes into heads only around its own two matrix multiplies, and projects queries, keys and values in a single one.
+- **2D matrix multiplies.** The blocks keep every position's tokens stacked in one `[batch × 64, 384]` matrix, because burn runs `Linear` on 3D inputs well below the speed of the 2D form. Attention reshapes into heads only around its own two matrix multiplies, and projects queries, keys and values in a single one.
 
 ## Measurements
 
@@ -95,6 +96,12 @@ The whole network, two runs each, alternating builds:
 | after | 9,699 and 10,223 | 11,840 and 11,730 |
 
 Self-play figures average the 5-second reports after the first minute. Self-play gained more than `bench` did, about 1.7×; the laptop's runs vary more than the 4090's did.
+
+### 64 tokens instead of 65
+
+The network used to give castling rights, en passant file and halfmove clock a token of their own, a 65th next to the squares. Adding them into every square's token instead keeps the network the same size, but attention's tiny matrix multiplies run much faster at 64 than at 65, likely because 65 spills into an extra, almost empty tile of the GPU's matrix kernels.
+
+On the laptop, a prototype measured with `bench` at batch 256 went from 10,200 to 13,400 positions/s at 8 blocks of width 384, from 16,700 to 24,500 at 8 × 256, and from 21,300 to 32,000 at 6 × 256. Self-play at 8 × 384 with 256 games went from 11,071 to 13,889 simulations/s.
 
 ## CPU parallelism
 

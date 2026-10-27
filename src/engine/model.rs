@@ -21,21 +21,24 @@ use burn::{
 struct ChessEmbedding<B: Backend> {
     e_piece: Embedding<B>,
     e_pos: Embedding<B>,
-    ff: Linear<B>,
+    e_state: Linear<B>,
 }
 
 impl<B: Backend> ChessEmbedding<B> {
-    // [batch_size, 64] piece tokens and [batch_size, N_STATE_FEATURES] -> [batch_size, 65, d_model],
-    // the CLS token first
+    // [batch_size, 64] piece tokens and [batch_size, N_STATE_FEATURES] -> [batch_size, 64, d_model],
+    // one token per square
     fn forward(&self, pieces: Tensor<B, 2, Int>, state_features: Tensor<B, 2>) -> Tensor<B, 3> {
         let squares = TensorData::new((0i32..64).collect(), [1, 64]);
         let squares = Tensor::from_data(squares, &pieces.device());
 
         let encoded_pieces = self.e_piece.forward(pieces);
         let encoded_squares = self.e_pos.forward(squares);
-        let cls_token = self.ff.forward(state_features).unsqueeze_dim(1);
+        // Castling rights, en passant file and the halfmove clock go into every square's token
+        // rather than a token of their own: attention over 64 tokens runs about a third faster
+        // than over 65
+        let encoded_state = self.e_state.forward(state_features).unsqueeze_dim(1);
 
-        Tensor::cat(vec![cls_token, encoded_pieces + encoded_squares], 1)
+        encoded_pieces + encoded_squares + encoded_state
     }
 }
 
@@ -50,7 +53,7 @@ impl ChessEmbeddingConfig {
         ChessEmbedding {
             e_piece: EmbeddingConfig::new(N_PIECE_TOKENS, self.d_model).init(device),
             e_pos: EmbeddingConfig::new(64, self.d_model).init(device),
-            ff: LinearConfig::new(N_STATE_FEATURES, self.d_model).init(device),
+            e_state: LinearConfig::new(N_STATE_FEATURES, self.d_model).init(device),
         }
     }
 }
@@ -105,7 +108,7 @@ struct AttentionBlock<B: Backend> {
 }
 
 impl<B: Backend> AttentionBlock<B> {
-    // [batch_size * 65, d_model]
+    // [batch_size * 64, d_model]
     fn forward(&self, input: Tensor<B, 2>, batch_size: usize) -> Tensor<B, 2> {
         let x = self.norm1.forward(input.clone());
         let x = self.attention.forward(x, batch_size);
@@ -153,18 +156,16 @@ struct PolicyHead<B: Backend> {
 }
 
 impl<B: Backend> PolicyHead<B> {
-    // [batch_size, 64, d_model] -> logits of the legal moves, [batch_size, max legal moves]
+    // [batch_size * 64, d_model] -> logits of the legal moves, [batch_size, max legal moves]
     fn forward(
         &self,
-        input: Tensor<B, 3>,
+        input: Tensor<B, 2>,
+        batch_size: usize,
         move_indices: Tensor<B, 2, Int>,
         padding: Tensor<B, 2>,
     ) -> Tensor<B, 2> {
-        let [batch_size, n_squares, d_model] = input.dims();
-        let x = self
-            .ff
-            .forward(input.reshape([batch_size * n_squares, d_model]));
-        let x = x.reshape([batch_size, n_squares * N_MOVE_PLANES]);
+        let x = self.ff.forward(input);
+        let x = x.reshape([batch_size, 64 * N_MOVE_PLANES]);
         x.gather(1, move_indices) + padding
     }
 }
@@ -183,17 +184,22 @@ impl PolicyHeadConfig {
     }
 }
 
+/// Reduces each square to a few features and reads the value from all of them together, as
+/// Leela's transformer networks do, so the head knows which square each feature came from.
 #[derive(Module, Debug)]
 struct ValueHead<B: Backend> {
+    square_ff: Linear<B>,
     ff1: Linear<B>,
     ff2: Linear<B>,
 }
 
 impl<B: Backend> ValueHead<B> {
-    // [batch_size, d_model] — CLS token
-    fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-        let x = self.ff1.forward(input);
-        let x = gelu(x);
+    // [batch_size * 64, d_model] -> [batch_size, 1]
+    fn forward(&self, input: Tensor<B, 2>, batch_size: usize) -> Tensor<B, 2> {
+        let x = gelu(self.square_ff.forward(input));
+        let d_square = x.dims()[1];
+        let x = x.reshape([batch_size, 64 * d_square]);
+        let x = gelu(self.ff1.forward(x));
         let x = self.ff2.forward(x);
         tanh(x)
     }
@@ -203,13 +209,19 @@ impl<B: Backend> ValueHead<B> {
 struct ValueHeadConfig {
     #[config(default = 384)]
     d_model: usize,
+    /// Features kept per square
+    #[config(default = 32)]
+    d_square: usize,
+    #[config(default = 128)]
+    d_hidden: usize,
 }
 
 impl ValueHeadConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> ValueHead<B> {
         ValueHead {
-            ff1: LinearConfig::new(self.d_model, self.d_model).init(device),
-            ff2: LinearConfig::new(self.d_model, 1).init(device),
+            square_ff: LinearConfig::new(self.d_model, self.d_square).init(device),
+            ff1: LinearConfig::new(64 * self.d_square, self.d_hidden).init(device),
+            ff2: LinearConfig::new(self.d_hidden, 1).init(device),
         }
     }
 }
@@ -239,25 +251,22 @@ impl<B: Backend> TransformerModel<B> {
         let attn_input = self.embedding.forward(input.pieces, input.state_features);
         let [batch_size, seq_len, d_model] = attn_input.dims();
 
-        // The blocks work on all positions' tokens stacked in one 2D matrix: burn multiplies 2D
+        // The network works on all positions' tokens stacked in one 2D matrix: burn multiplies 2D
         // matrices faster than the 3D form a linear layer would otherwise use
         let attn_input = attn_input.reshape([batch_size * seq_len, d_model]);
         let attn_output = self
             .attention_blocks
             .iter()
             .fold(attn_input, |x, block| block.forward(x, batch_size));
-        let attn_output = self
-            .final_norm
-            .forward(attn_output)
-            .reshape([batch_size, seq_len, d_model]);
+        let squares = self.final_norm.forward(attn_output);
 
-        let cls_token = attn_output.clone().narrow(1, 0, 1).squeeze_dim(1); // [B, d_model]
-        let squares = attn_output.narrow(1, 1, seq_len - 1); // [B, 64, d_model]
-
-        let policy = self
-            .policy_head
-            .forward(squares, input.move_indices, input.padding);
-        let value = self.value_head.forward(cls_token);
+        let policy = self.policy_head.forward(
+            squares.clone(),
+            batch_size,
+            input.move_indices,
+            input.padding,
+        );
+        let value = self.value_head.forward(squares, batch_size);
 
         (policy, value)
     }

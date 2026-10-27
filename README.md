@@ -39,12 +39,12 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 
 **Network** (`src/engine/model.rs`)
 
-- Input is 65 tokens: one per square (piece embedding plus square embedding), and a CLS token encoding castling rights, en passant file and the halfmove clock.
-- The board is seen from the side to move: for black it's mirrored top to bottom with the colours swapped, and moves are mirrored to match. The network learns each pattern once rather than once per colour. Chess is the same game mirrored, so the side to move isn't an input, and a position and its mirror image evaluate identically.
+- Input is 64 tokens, one per square: a piece embedding, a square embedding, and an embedding of the castling rights, en passant file and halfmove clock, added together. A separate 65th token for those would make attention about a third slower.
+- The board is seen from the side to move: for black it's mirrored top to bottom with the colors swapped, and moves are mirrored to match. The network learns each pattern once rather than once per color. Chess is the same game mirrored, so the side to move isn't an input, and a position and its mirror image evaluate identically.
 - 8 pre-norm transformer blocks: 6 heads, model width 384, RMSNorm, GELU. A final RMSNorm normalizes the residual stream before the heads.
 - The blocks keep every position's tokens in one 2D matrix, which burn multiplies faster than the 3D form, and attention projects queries, keys and values with a single matrix multiply.
 - Policy head: 73 move planes per square, 4,672 moves in total, using the AlphaZero encoding in `src/engine/encoding.rs`. Only the legal moves' logits are gathered on the device, so the softmax and the data read back cover just those moves.
-- Value head: reads the CLS token and outputs a tanh score in [−1, 1] for the side to move.
+- Value head: reduces each square to 32 features, then reads all 64 squares' features together through a 128-unit layer to a tanh score in [−1, 1] for the side to move, as Leela's transformer networks do.
 
 **Search** (`src/engine/mcts.rs`)
 
