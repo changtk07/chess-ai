@@ -41,7 +41,7 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 
 - Input is 65 tokens: one per square (piece embedding plus square embedding), and a CLS token encoding side to move, castling rights, en passant file and the halfmove clock.
 - 8 pre-norm transformer blocks: 6 heads, model width 384, RMSNorm, GELU.
-- Policy head: 73 move planes per square, 4,672 moves in total, using the AlphaZero encoding in `src/engine/policy.rs`. Only the legal moves' logits are gathered on the device, so the softmax and the data read back cover just those moves.
+- Policy head: 73 move planes per square, 4,672 moves in total, using the AlphaZero encoding in `src/engine/encoding.rs`. Only the legal moves' logits are gathered on the device, so the softmax and the data read back cover just those moves.
 - Value head: reads the CLS token and outputs a tanh score in [−1, 1] for the side to move.
 
 **Search** (`src/engine/mcts.rs`)

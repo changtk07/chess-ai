@@ -1,6 +1,6 @@
 use crate::{
-    chess::{board::CastlingRights, moves::Move, State},
-    engine::policy::{LegalMoveIndices, N_MOVE_PLANES},
+    chess::{moves::Move, State},
+    engine::encoding::{NetworkInput, N_MOVE_PLANES, N_PIECE_TOKENS, N_STATE_FEATURES},
 };
 use burn::{
     config::Config,
@@ -25,47 +25,17 @@ struct ChessEmbedding<B: Backend> {
 }
 
 impl<B: Backend> ChessEmbedding<B> {
-    fn forward(&self, states: &[&State], device: &B::Device) -> Tensor<B, 3> {
-        let batch_size = states.len();
+    // [batch_size, 64] piece tokens and [batch_size, N_STATE_FEATURES] -> [batch_size, 65, d_model],
+    // the CLS token first
+    fn forward(&self, pieces: Tensor<B, 2, Int>, state_features: Tensor<B, 2>) -> Tensor<B, 3> {
+        let squares = TensorData::new((0i32..64).collect(), [1, 64]);
+        let squares = Tensor::from_data(squares, &pieces.device());
 
-        let mut piece_data = Vec::with_capacity(batch_size * 64);
-        piece_data.extend(states.iter().flat_map(|state| {
-            state
-                .board
-                .mailbox
-                .iter()
-                .map(|sqr| sqr.map_or(0i32, |p| p as i32 + 1))
-        }));
+        let encoded_pieces = self.e_piece.forward(pieces);
+        let encoded_squares = self.e_pos.forward(squares);
+        let cls_token = self.ff.forward(state_features).unsqueeze_dim(1);
 
-        let mut metadata = Vec::with_capacity(batch_size * 15);
-        metadata.extend(states.iter().flat_map(|state| {
-            let en_passant_idx = state.en_passant.map_or(0, |ep| ep.file() + 1);
-            [(state.turn as i8 * -2 + 1) as f32]
-                .into_iter()
-                .chain(
-                    [
-                        CastlingRights::WHITE_KING_SIDE,
-                        CastlingRights::WHITE_QUEEN_SIDE,
-                        CastlingRights::BLACK_KING_SIDE,
-                        CastlingRights::BLACK_QUEEN_SIDE,
-                    ]
-                    .map(|r| state.castling_rights.has(r) as i8 as f32),
-                )
-                // One-hot en passant file: index 0 = none, 1..=8 = files a..h
-                .chain((0..9).map(move |i| (i == en_passant_idx) as i8 as f32))
-                .chain([state.halfmove_clock as f32 / 100.0])
-        }));
-
-        let piece_input = Tensor::from_data(TensorData::new(piece_data, [batch_size, 64]), device);
-        let pos_input = Tensor::from_data(TensorData::new((0i32..64).collect(), [1, 64]), device);
-        let metadata_input: Tensor<B, 2> =
-            Tensor::from_data(TensorData::new(metadata, [batch_size, 15]), device);
-
-        let encoded_piece = self.e_piece.forward(piece_input);
-        let encoded_pos = self.e_pos.forward(pos_input);
-        let cls_token = self.ff.forward(metadata_input).unsqueeze_dim(1);
-
-        Tensor::cat(vec![cls_token, encoded_piece + encoded_pos], 1)
+        Tensor::cat(vec![cls_token, encoded_pieces + encoded_squares], 1)
     }
 }
 
@@ -78,9 +48,9 @@ struct ChessEmbeddingConfig {
 impl ChessEmbeddingConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> ChessEmbedding<B> {
         ChessEmbedding {
-            e_piece: EmbeddingConfig::new(13, self.d_model).init(device),
+            e_piece: EmbeddingConfig::new(N_PIECE_TOKENS, self.d_model).init(device),
             e_pos: EmbeddingConfig::new(64, self.d_model).init(device),
-            ff: LinearConfig::new(15, self.d_model).init(device),
+            ff: LinearConfig::new(N_STATE_FEATURES, self.d_model).init(device),
         }
     }
 }
@@ -212,15 +182,8 @@ pub(crate) struct Evaluation {
 impl<B: Backend> TransformerModel<B> {
     /// Returns legal-move logits, [batch_size, max legal moves], and values, [batch_size, 1].
     /// Logits past a position's own move count are padding.
-    pub(crate) fn forward(
-        &self,
-        states: &[&State],
-        moves: &[impl AsRef<[Move]>],
-        device: &B::Device,
-    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
-        assert_eq!(states.len(), moves.len());
-        let (move_indices, padding) = moves.legal_move_indices(device);
-        let attn_input = self.embedding.forward(states, device);
+    pub(crate) fn forward(&self, input: NetworkInput<B>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        let attn_input = self.embedding.forward(input.pieces, input.state_features);
 
         let attn_output = self
             .attention_blocks
@@ -231,7 +194,9 @@ impl<B: Backend> TransformerModel<B> {
         let cls_token = attn_output.clone().narrow(1, 0, 1).squeeze_dim(1); // [B, d_model]
         let squares = attn_output.narrow(1, 1, seq_len - 1); // [B, 64, d_model]
 
-        let policy = self.policy_head.forward(squares, move_indices, padding);
+        let policy = self
+            .policy_head
+            .forward(squares, input.move_indices, input.padding);
         let value = self.value_head.forward(cls_token);
 
         (policy, value)
@@ -244,7 +209,7 @@ impl<B: Backend> TransformerModel<B> {
         moves: &[impl AsRef<[Move]>],
         device: &B::Device,
     ) -> Vec<Evaluation> {
-        let (logits, value) = self.forward(states, moves, device);
+        let (logits, value) = self.forward(NetworkInput::new(states, moves, device));
         let width = logits.dims()[1];
         let output = Tensor::cat(vec![softmax(logits, 1), value], 1);
         let data = output.into_data().convert::<f32>().to_vec::<f32>().unwrap();
