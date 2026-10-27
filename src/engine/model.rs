@@ -274,7 +274,10 @@ pub(crate) fn tiny_model() -> TransformerModel<burn::backend::NdArray> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chess::state::START_FEN;
+    use crate::{
+        chess::state::START_FEN,
+        engine::encoding::{mirror_fen, mirror_move},
+    };
     use burn::{
         backend::{Cuda, NdArray},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
@@ -338,6 +341,28 @@ mod tests {
         backward.priors.reverse();
 
         assert!(max_diff(&forward.priors, &backward.priors) < 1e-6);
+    }
+
+    #[test]
+    fn mirrored_positions_evaluate_the_same() {
+        let model = tiny_model();
+        let device = Default::default();
+
+        for fen in FENS {
+            let state = State::from_fen(fen);
+            let mirrored = State::from_fen(&mirror_fen(fen));
+            let moves = state.generate_moves();
+            let mirrored_moves: Vec<Move> = moves.iter().map(|&mv| mirror_move(mv)).collect();
+
+            let evaluations = model.evaluate(
+                &[&state, &mirrored],
+                &[&moves[..], &mirrored_moves[..]],
+                &device,
+            );
+            let (white, black) = (&evaluations[0], &evaluations[1]);
+            assert!(max_diff(&white.priors, &black.priors) < 1e-6);
+            assert!((white.value - black.value).abs() < 1e-6);
+        }
     }
 
     fn max_diff(a: &[f32], b: &[f32]) -> f32 {
