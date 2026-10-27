@@ -62,11 +62,7 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 
 - [x] Batched leaf evaluation on a GPU backend: see [docs/performance.md](docs/performance.md)
 - [x] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples
-- [ ] Network changes, all before any weights are trained:
-  - Move the network's input encoding next to the move encoding in `policy.rs`, so the board flip changes both consistently and training can encode samples without a forward pass.
-  - Flip the board so the side to move is always at the bottom: the network then learns each pattern once instead of once per colour.
-  - Add a final `RmsNorm` before the policy and value heads. The blocks normalize their inputs, so the residual stream otherwise reaches the heads unnormalized.
-  - Set attention dropout deliberately: burn defaults it to 0.1, which only takes effect once training runs.
+- [x] Network changes before any weights are trained: inputs encoded apart from the network in `src/engine/encoding.rs`, the board seen from the side to move, a final RMSNorm before the heads, and attention dropout off
 - [ ] Faster network, now about 98% of self-play time:
   - Flatten inputs to 2D before linear layers: burn's 3D form runs at about half the speed of a 2D matrix multiply.
   - Look at attention, and consider a smaller network.

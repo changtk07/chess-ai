@@ -86,12 +86,16 @@ struct AttentionBlockConfig {
     d_model: usize,
     #[config(default = 768)]
     d_ff: usize,
+    #[config(default = 0.0)]
+    attention_dropout: f64,
 }
 
 impl AttentionBlockConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> AttentionBlock<B> {
         AttentionBlock {
-            attention: MultiHeadAttentionConfig::new(self.d_model, self.n_heads).init(device),
+            attention: MultiHeadAttentionConfig::new(self.d_model, self.n_heads)
+                .with_dropout(self.attention_dropout)
+                .init(device),
             norm1: RmsNormConfig::new(self.d_model).init(device),
             norm2: RmsNormConfig::new(self.d_model).init(device),
             ff1: LinearConfig::new(self.d_model, self.d_ff).init(device),
@@ -238,6 +242,11 @@ pub(crate) struct TransformerModelConfig {
     d_ff_scale: f64,
     #[config(default = 64)]
     head_dimension: usize,
+    /// Share of attention weights dropped while training; inference never drops any. Off, rather
+    /// than burn's default of 0.1: self-play keeps producing new positions, so the network is
+    /// unlikely to overfit them, and AlphaZero regularized with weight decay alone.
+    #[config(default = 0.0)]
+    attention_dropout: f64,
 }
 
 impl TransformerModelConfig {
@@ -255,6 +264,7 @@ impl TransformerModelConfig {
                         .with_n_heads(self.n_heads)
                         .with_d_model(d_model)
                         .with_d_ff(d_ff)
+                        .with_attention_dropout(self.attention_dropout)
                         .init(device)
                 })
                 .collect(),
