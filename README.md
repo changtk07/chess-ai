@@ -13,7 +13,7 @@ cargo run --release -- perft 5   # count positions at depth 5 from the start, pe
 cargo test                       # move generation, game outcome, search and self-play tests
 ```
 
-`self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, applying its results, and writing samples.
+`self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Both `self-play` and `bench` take `--blocks` (8) and `--width` (384, a multiple of 64) to try other network sizes. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, applying its results, and writing samples.
 
 With `--out data/selfplay.bin`, each finished game's training samples are appended to that file: one per move played, with the position, every legal move's visit count from its search, and the game's result for the side to move. Games stopped at the ply limit count as draws. The format is described in `src/engine/samples.rs`.
 

@@ -25,7 +25,10 @@ Commands:
                       play games with untrained weights, reporting throughput and
                       appending each finished game's training samples to the file
   bench [max_batch]   network throughput by batch size, then search speed
-  perft [depth]       count positions from the start, per root move";
+  perft [depth]       count positions from the start, per root move
+
+self-play and bench also take the network's size: [--blocks 8] [--width 384],
+where the width is a multiple of 64";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -53,9 +56,10 @@ fn run<B: Backend>(mut args: Vec<String>, device: &B::Device) {
             perft(depth);
         }
         "bench" => {
+            let model_config = take_model_config(&mut args);
             let max_batch_size = take_positional(&mut args, "max_batch", 256);
             reject_leftovers(&args);
-            bench::run::<B>(device, max_batch_size);
+            bench::run::<B>(device, &model_config, max_batch_size);
         }
         "self-play" => self_play::<B>(args, device),
         other => usage_error(&format!("unknown command {other}")),
@@ -75,6 +79,23 @@ fn take_option(args: &mut Vec<String>, name: &str) -> Option<String> {
 
 fn take_parsed_option<T: FromStr>(args: &mut Vec<String>, name: &str, default: T) -> T {
     take_option(args, name).map_or(default, |value| parse(name, &value))
+}
+
+// The network size from --blocks and --width. Heads keep their size, so the width sets how many
+// there are.
+fn take_model_config(args: &mut Vec<String>) -> TransformerModelConfig {
+    let mut config = TransformerModelConfig::new();
+    config.n_blocks = take_parsed_option(args, "--blocks", config.n_blocks);
+    let width = take_parsed_option(args, "--width", config.d_model());
+
+    if config.n_blocks == 0 || width == 0 || !width.is_multiple_of(config.head_dimension) {
+        usage_error(&format!(
+            "--blocks must be at least 1, and --width a positive multiple of {}",
+            config.head_dimension
+        ));
+    }
+    config.n_heads = width / config.head_dimension;
+    config
 }
 
 // Takes the first argument if it isn't an option
@@ -114,6 +135,7 @@ fn perft(depth: u8) {
 }
 
 fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
+    let model_config = take_model_config(&mut args);
     let out = take_option(&mut args, "--out");
     let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 256);
     let n_sims: usize = take_parsed_option(&mut args, "--sims", 800);
@@ -137,7 +159,7 @@ fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
 
     // Until weights can be loaded from a file, the seed also fixes the random initial weights
     B::seed(device, seed);
-    let model = TransformerModelConfig::new().init::<B>(device);
+    let model = model_config.init::<B>(device);
     let mcts_config = MctsConfig::new().with_n_sims(n_sims);
     let config = SelfPlayConfig::new()
         .with_n_parallel(n_parallel)
@@ -145,8 +167,11 @@ fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
         .with_seed(seed);
 
     println!(
-        "Backend: {}, {n_parallel} games at a time, {n_sims} simulations per move",
-        B::name(device)
+        "Backend: {}, network of {} blocks, width {}, {n_parallel} games at a time, {n_sims} \
+         simulations per move",
+        B::name(device),
+        model_config.n_blocks,
+        model_config.d_model()
     );
 
     let mut previous = SelfPlayStats::default();

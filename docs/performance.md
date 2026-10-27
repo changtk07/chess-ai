@@ -103,6 +103,22 @@ The network used to give castling rights, en passant file and halfmove clock a t
 
 On the laptop, a prototype measured with `bench` at batch 256 went from 10,200 to 13,400 positions/s at 8 blocks of width 384, from 16,700 to 24,500 at 8 × 256, and from 21,300 to 32,000 at 6 × 256. Self-play at 8 × 384 with 256 games went from 11,071 to 13,889 simulations/s.
 
+### Network size
+
+Self-play simulations/s on the laptop with 64 tokens, `--backend cuda-bf16`, from `--blocks` and `--width`, averaging the 5-second reports from 40 s on:
+
+| blocks × width | 256 games | 512 games |
+|---|---|---|
+| 6 × 256 | 26,965 | 29,061 |
+| 8 × 256 | 24,316 | **27,596** |
+| 10 × 256 | 20,425 | 20,864 |
+| 12 × 256 | 16,516 | 17,855 |
+| 6 × 384 | 16,529 | 19,209 |
+| 8 × 384 | 13,889 | 12,974 |
+| 10 × 384 | 10,173 | 10,188 |
+
+From 8 blocks up, time grows about in proportion to the number of blocks. Below that, the work outside the blocks stops shrinking: 6 blocks gained only 5–10% over 8, with the network still about 93% of each step. 512 games helped the smaller networks and made no difference to the larger ones. Runs differ by up to about 10% on the laptop, so treat smaller gaps as noise.
+
 ## CPU parallelism
 
 Tree work on one thread takes about 0.36 ms per 256-game step, against about 17 ms for the network. With rayon over 24 threads it took about 3.6 ms, and the network call itself rose from about 17.4 to 18.9 ms. Dispatching thousands of microsecond tasks costs more than it saves, and idle workers likely compete with the thread driving the GPU. Rayon was slower at every size tried, so the tree work is sequential.

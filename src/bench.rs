@@ -15,9 +15,18 @@ const MAX_WARM_UP_ITERS: usize = 10;
 const SETTLED_RATIO: f64 = 0.9;
 const SEARCH_N_SIMS: usize = 128;
 
-pub(crate) fn run<B: Backend>(device: &B::Device, max_batch_size: usize) {
-    let model = TransformerModelConfig::new().init::<B>(device);
-    println!("Backend: {}", B::name(device));
+pub(crate) fn run<B: Backend>(
+    device: &B::Device,
+    model_config: &TransformerModelConfig,
+    max_batch_size: usize,
+) {
+    let model = model_config.init::<B>(device);
+    println!(
+        "Backend: {}, network of {} blocks, width {}",
+        B::name(device),
+        model_config.n_blocks,
+        model_config.d_model()
+    );
 
     println!("\nNetwork: input encoding, forward pass and readback");
     println!("{:>6} {:>10} {:>12}", "batch", "ms/call", "positions/s");

@@ -296,13 +296,14 @@ impl<B: Backend> TransformerModel<B> {
 #[derive(Config, Debug)]
 pub(crate) struct TransformerModelConfig {
     #[config(default = 8)]
-    n_blocks: usize,
+    pub(crate) n_blocks: usize,
+    /// The model width is the number of heads times the head dimension
     #[config(default = 6)]
-    n_heads: usize,
+    pub(crate) n_heads: usize,
     #[config(default = 2.0)]
     d_ff_scale: f64,
     #[config(default = 64)]
-    head_dimension: usize,
+    pub(crate) head_dimension: usize,
     /// Share of attention weights dropped while training; inference never drops any. Off, rather
     /// than burn's default of 0.1: self-play keeps producing new positions, so the network is
     /// unlikely to overfit them, and AlphaZero regularized with weight decay alone.
@@ -311,8 +312,12 @@ pub(crate) struct TransformerModelConfig {
 }
 
 impl TransformerModelConfig {
+    pub(crate) fn d_model(&self) -> usize {
+        self.n_heads * self.head_dimension
+    }
+
     pub(crate) fn init<B: Backend>(&self, device: &B::Device) -> TransformerModel<B> {
-        let d_model = self.n_heads * self.head_dimension;
+        let d_model = self.d_model();
         let d_ff = (self.d_ff_scale * d_model as f64) as usize;
 
         TransformerModel {
