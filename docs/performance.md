@@ -1,6 +1,6 @@
 # Performance notes
 
-How self-play runs fast on an RTX 4090 under WSL2, with measurements to compare future changes against and the pitfalls hit along the way. Measured 2026-10-25 and 2026-10-26.
+How self-play runs fast on an RTX 4090 under WSL2, with measurements to compare future changes against and the pitfalls hit along the way. Measured 2026-10-25 and 2026-10-26; the 2D layers and fused attention were measured on a laptop on 2026-10-28, and the 4090 figures predate them.
 
 Self-play runs at about 15,500 simulations/s: 256 games at once, with their positions evaluated in batches on the GPU in bf16 and the tree work on one CPU thread. Before this work it ran about 30 simulations/s on the CPU. The network is now about 98% of every step, so further speed has to come from the network.
 
@@ -9,6 +9,7 @@ The work is in the commits from `feat: add bench command for network and search 
 ## Environment
 
 - WSL2 running Arch Linux, i7-13700KF (24 threads), 15 GB RAM visible to WSL, RTX 4090 24 GB, Windows driver 621.01.
+- Also a laptop: WSL2 running Arch Linux, 16 threads, 31 GB RAM visible to WSL, RTX 5080 Laptop GPU 16 GB (power limit up to 130 W), the same driver and CUDA 13.4. It runs the network at roughly half the 4090's speed, so compare measurements within one machine only.
 - The wgpu backend finds no Vulkan adapter under WSL2, so the GPU path is CUDA.
 - burn's CUDA backend compiles kernels at runtime with NVRTC, which comes with the CUDA toolkit. Here that's CUDA 13.4 from `pacman -S cuda`, installed to `/opt/cuda`.
 - cudarc 0.18, which burn 0.20 pins, rejects toolkits newer than CUDA 13.1. `.cargo/config.toml` sets `CUDARC_CUDA_VERSION=13010` so it builds against its 13.1 bindings, which work with 13.4.
@@ -20,6 +21,7 @@ The work is in the commits from `feat: add bench command for network and search 
 - **Pausable search.** `Search::next_leaf` runs simulations until one reaches a position the network must evaluate, and leaves the state there. `Search::apply` takes the network's output, backs the value up and returns the state to the root. Finished games are scored without the network.
 - **Legal moves only.** Each position's legal-move indices are uploaded, padded to the batch's largest move count. The policy head picks out just those logits on the GPU, and priors and values come back in one small transfer, instead of all 4,672 moves per position.
 - **One upload per input.** A batch's inputs are built in single host buffers. Per-position tensors stall burn's fusion optimizer (see the pitfalls below).
+- **2D matrix multiplies.** The blocks keep every position's tokens stacked in one `[batch × 65, 384]` matrix, because burn runs `Linear` on 3D inputs well below the speed of the 2D form. Attention reshapes into heads only around its own two matrix multiplies, and projects queries, keys and values in a single one.
 
 ## Measurements
 
@@ -68,6 +70,32 @@ With a fixed `--games`, batches shrink as the last games finish, and those games
 
 A plain 2D matrix multiply at the network's layer size, `[batch × 65, 384] × [384, 384]`, reaches 37–43 TFLOPS in f32. burn's 3D form, which `Linear` uses on `[batch, 65, 384]` inputs, gets about half that. The whole network does about 10 TFLOPS in f32 and about 20 in bf16.
 
+### 2D layers and fused attention
+
+Measured on the laptop with `--backend cuda-bf16`, at batch 256 unless noted.
+
+A chain of 32 `Linear(384, 384)` layers ran at 20 TFLOPS on `[batch, 65, 384]` inputs and 29 TFLOPS on the same data as a `[batch × 65, 384]` matrix (31 against 21 at batch 1,024). In f32 the gap was wider: 17 against 9.5 TFLOPS.
+
+Timing the network's parts before the change, attention took 22 of its 35 ms, the feed-forward layers 12.5, and input encoding, embedding, heads and readback about 1.2 together. Attention's four projections do the same work as the feed-forward layers, so about 10 ms went to the attention core: the score matrix multiplies, softmax and the reshapes between tokens and heads. Its matrix multiplies are 1,536 tiny `[65 × 64] × [64 × 65]` products per call, which run far below the GPU's speed.
+
+Eight attention sublayers, chained:
+
+| attention | ms |
+|---|---|
+| burn's `MultiHeadAttention`, 3D | 23.1 |
+| written out, 2D projections | 16.7 |
+| written out, one fused query/key/value projection | **15.3** |
+| the same without the core (projections only) | 6.2 |
+
+The whole network, two runs each, alternating builds:
+
+| | positions/s, `bench` batch 256 | self-play simulations/s |
+|---|---|---|
+| before | 7,410 and 5,872 | 6,850 and 6,800 |
+| after | 9,699 and 10,223 | 11,840 and 11,730 |
+
+Self-play figures average the 5-second reports after the first minute. Self-play gained more than `bench` did, about 1.7×; the laptop's runs vary more than the 4090's did.
+
 ## CPU parallelism
 
 Tree work on one thread takes about 0.36 ms per 256-game step, against about 17 ms for the network. With rayon over 24 threads it took about 3.6 ms, and the network call itself rose from about 17.4 to 18.9 ms. Dispatching thousands of microsecond tasks costs more than it saves, and idle workers likely compete with the thread driving the GPU. Rayon was slower at every size tried, so the tree work is sequential.
@@ -88,6 +116,7 @@ At about 15,500 simulations/s and 800 simulations per move, a 150-ply game is 12
 - **256 parallel games by default.** 512 and 1,024 were no faster and use more memory.
 - **Tree work on one thread,** per the measurements above.
 - **The CPU stays the default backend,** so tests and other machines stay portable. Pass `--backend cuda-bf16` for self-play.
+- **Attention is written out** rather than calling `burn::tensor::module::attention`. In burn 0.20 that op falls back to the same naive steps under the fusion backend, so it gains nothing, and without fusion the CUDA backend runs a flash-attention kernel with a causal mask hard-coded, which would silently stop squares from attending to later squares.
 
 ## Benchmarking pitfalls
 
@@ -97,3 +126,5 @@ At about 15,500 simulations/s and 800 simulations per move, a 150-ply game is 12
 4. **A scratch copy of the repo that shares `CARGO_TARGET_DIR` reuses the repo's binaries,** because cargo doesn't hash the absolute path. Rename the package in the copy's `Cargo.toml`.
 5. **Stack sampling needs `sudo eu-stack -p <pid>`,** since ptrace is restricted for normal users.
 6. **zsh doesn't split unquoted variables into words,** so `set -- $cfg` and similar loops in benchmark scripts pass one argument where bash would pass several.
+7. **Laptop power modes cap the GPU.** Partway through one session the laptop's GPU limit dropped to 33 W, and the network ran 5× slower. Check `enforced.power.limit` with `nvidia-smi --query-gpu=power.draw,enforced.power.limit,clocks_event_reasons.sw_power_cap --format=csv` under load. On ASUS laptops, G-Helper's Turbo or Balanced mode on the barrel charger lifts it, and the limit rises to 103–130 W under load.
+8. **Restarting WSL clears `/tmp`.** Keep baseline binaries for before/after comparisons under `target/`.

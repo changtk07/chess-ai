@@ -42,6 +42,7 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 - Input is 65 tokens: one per square (piece embedding plus square embedding), and a CLS token encoding castling rights, en passant file and the halfmove clock.
 - The board is seen from the side to move: for black it's mirrored top to bottom with the colours swapped, and moves are mirrored to match. The network learns each pattern once rather than once per colour. Chess is the same game mirrored, so the side to move isn't an input, and a position and its mirror image evaluate identically.
 - 8 pre-norm transformer blocks: 6 heads, model width 384, RMSNorm, GELU. A final RMSNorm normalizes the residual stream before the heads.
+- The blocks keep every position's tokens in one 2D matrix, which burn multiplies faster than the 3D form, and attention projects queries, keys and values with a single matrix multiply.
 - Policy head: 73 move planes per square, 4,672 moves in total, using the AlphaZero encoding in `src/engine/encoding.rs`. Only the legal moves' logits are gathered on the device, so the softmax and the data read back cover just those moves.
 - Value head: reads the CLS token and outputs a tanh score in [−1, 1] for the side to move.
 
@@ -64,8 +65,8 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 - [x] Self-play data: Dirichlet noise at the root, and recording (position, visit distribution, result) samples
 - [x] Network changes before any weights are trained: inputs encoded apart from the network in `src/engine/encoding.rs`, the board seen from the side to move, a final RMSNorm before the heads, and attention dropout off
 - [ ] Faster network, now about 98% of self-play time:
-  - Flatten inputs to 2D before linear layers: burn's 3D form runs at about half the speed of a 2D matrix multiply.
-  - Look at attention, and consider a smaller network.
+  - [x] 2D linear layers and a fused query/key/value projection: self-play about 1.7× faster on the laptop. Re-measure on the 4090.
+  - Look at the attention core, still about 60% of attention time, and consider a smaller network.
 - [ ] Reuse the search tree between moves:
   - First measure how many of each search's visits the chosen move's subtree holds: that's the share of evaluations reuse would save.
   - A reused root is already expanded, so noise must be mixed into its existing priors. Decide whether `--sims` means new simulations per move or total visits at the root, since samples record visits.

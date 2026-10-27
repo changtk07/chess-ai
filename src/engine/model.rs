@@ -6,8 +6,8 @@ use burn::{
     config::Config,
     module::Module,
     nn::{
-        attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig},
-        Embedding, EmbeddingConfig, Linear, LinearConfig, RmsNorm, RmsNormConfig,
+        Dropout, DropoutConfig, Embedding, EmbeddingConfig, Linear, LinearConfig, RmsNorm,
+        RmsNormConfig,
     },
     tensor::{
         activation::{gelu, softmax, tanh},
@@ -55,9 +55,49 @@ impl ChessEmbeddingConfig {
     }
 }
 
+/// Multi-head self-attention over each position's tokens. It takes the batch's tokens stacked in
+/// one 2D matrix, like the rest of the network, and projects queries, keys and values with a single
+/// matrix multiply.
+#[derive(Module, Debug)]
+struct SelfAttention<B: Backend> {
+    qkv: Linear<B>,
+    output: Linear<B>,
+    dropout: Dropout,
+    n_heads: usize,
+}
+
+impl<B: Backend> SelfAttention<B> {
+    // [batch_size * seq_len, d_model] -> [batch_size * seq_len, d_model]
+    fn forward(&self, input: Tensor<B, 2>, batch_size: usize) -> Tensor<B, 2> {
+        let [n_tokens, d_model] = input.dims();
+        let seq_len = n_tokens / batch_size;
+        let d_head = d_model / self.n_heads;
+
+        // [batch_size, 3 * n_heads, seq_len, d_head]: every head's queries, then keys, then values
+        let qkv = self
+            .qkv
+            .forward(input)
+            .reshape([batch_size, seq_len, 3 * self.n_heads, d_head])
+            .swap_dims(1, 2);
+        let query = qkv.clone().narrow(1, 0, self.n_heads);
+        let key = qkv.clone().narrow(1, self.n_heads, self.n_heads);
+        let value = qkv.narrow(1, 2 * self.n_heads, self.n_heads);
+
+        let scores = query
+            .matmul(key.swap_dims(2, 3))
+            .div_scalar((d_head as f32).sqrt());
+        let weights = self.dropout.forward(softmax(scores, 3));
+        let context = weights
+            .matmul(value)
+            .swap_dims(1, 2)
+            .reshape([n_tokens, d_model]);
+        self.output.forward(context)
+    }
+}
+
 #[derive(Module, Debug)]
 struct AttentionBlock<B: Backend> {
-    attention: MultiHeadAttention<B>,
+    attention: SelfAttention<B>,
     norm1: RmsNorm<B>,
     norm2: RmsNorm<B>,
     ff1: Linear<B>,
@@ -65,10 +105,10 @@ struct AttentionBlock<B: Backend> {
 }
 
 impl<B: Backend> AttentionBlock<B> {
-    // [batch_size, 65, d_model]
-    fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
+    // [batch_size * 65, d_model]
+    fn forward(&self, input: Tensor<B, 2>, batch_size: usize) -> Tensor<B, 2> {
         let x = self.norm1.forward(input.clone());
-        let x = self.attention.forward(MhaInput::self_attn(x)).context;
+        let x = self.attention.forward(x, batch_size);
         let middle = input + x;
         let x = self.norm2.forward(middle.clone());
         let x = self.ff1.forward(x);
@@ -93,9 +133,12 @@ struct AttentionBlockConfig {
 impl AttentionBlockConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> AttentionBlock<B> {
         AttentionBlock {
-            attention: MultiHeadAttentionConfig::new(self.d_model, self.n_heads)
-                .with_dropout(self.attention_dropout)
-                .init(device),
+            attention: SelfAttention {
+                qkv: LinearConfig::new(self.d_model, 3 * self.d_model).init(device),
+                output: LinearConfig::new(self.d_model, self.d_model).init(device),
+                dropout: DropoutConfig::new(self.attention_dropout).init(),
+                n_heads: self.n_heads,
+            },
             norm1: RmsNormConfig::new(self.d_model).init(device),
             norm2: RmsNormConfig::new(self.d_model).init(device),
             ff1: LinearConfig::new(self.d_model, self.d_ff).init(device),
@@ -117,8 +160,11 @@ impl<B: Backend> PolicyHead<B> {
         move_indices: Tensor<B, 2, Int>,
         padding: Tensor<B, 2>,
     ) -> Tensor<B, 2> {
-        let x = self.ff.forward(input);
-        let x = x.flatten(1, 2);
+        let [batch_size, n_squares, d_model] = input.dims();
+        let x = self
+            .ff
+            .forward(input.reshape([batch_size * n_squares, d_model]));
+        let x = x.reshape([batch_size, n_squares * N_MOVE_PLANES]);
         x.gather(1, move_indices) + padding
     }
 }
@@ -191,14 +237,20 @@ impl<B: Backend> TransformerModel<B> {
     /// Logits past a position's own move count are padding.
     pub(crate) fn forward(&self, input: NetworkInput<B>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let attn_input = self.embedding.forward(input.pieces, input.state_features);
+        let [batch_size, seq_len, d_model] = attn_input.dims();
 
+        // The blocks work on all positions' tokens stacked in one 2D matrix: burn multiplies 2D
+        // matrices faster than the 3D form a linear layer would otherwise use
+        let attn_input = attn_input.reshape([batch_size * seq_len, d_model]);
         let attn_output = self
             .attention_blocks
             .iter()
-            .fold(attn_input, |x, block| block.forward(x));
-        let attn_output = self.final_norm.forward(attn_output);
+            .fold(attn_input, |x, block| block.forward(x, batch_size));
+        let attn_output = self
+            .final_norm
+            .forward(attn_output)
+            .reshape([batch_size, seq_len, d_model]);
 
-        let seq_len = attn_output.dims()[1];
         let cls_token = attn_output.clone().narrow(1, 0, 1).squeeze_dim(1); // [B, d_model]
         let squares = attn_output.narrow(1, 1, seq_len - 1); // [B, 64, d_model]
 
@@ -295,8 +347,10 @@ mod tests {
     };
     use burn::{
         backend::{Cuda, NdArray},
+        module::Param,
+        nn::attention::{MhaInput, MultiHeadAttentionConfig},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
-        tensor::{bf16, f16},
+        tensor::{bf16, f16, Distribution},
     };
 
     const FENS: [&str; 3] = [
@@ -356,6 +410,42 @@ mod tests {
         backward.priors.reverse();
 
         assert!(max_diff(&forward.priors, &backward.priors) < 1e-6);
+    }
+
+    // burn's multi-head attention projects queries, keys and values separately and works on 3D
+    // inputs, so with the same weights it checks the fused projection and the head layout
+    #[test]
+    fn self_attention_matches_burns() {
+        let device = Default::default();
+        let (batch_size, seq_len, d_model, n_heads) = (3, 65, 32, 4);
+        let mha = MultiHeadAttentionConfig::new(d_model, n_heads)
+            .with_dropout(0.0)
+            .init::<NdArray>(&device);
+
+        let projections = [&mha.query, &mha.key, &mha.value];
+        let weights = projections.map(|linear| linear.weight.val());
+        let biases = projections.map(|linear| linear.bias.as_ref().unwrap().val());
+        let attention = SelfAttention {
+            qkv: Linear {
+                weight: Param::from_tensor(Tensor::cat(weights.to_vec(), 1)),
+                bias: Some(Param::from_tensor(Tensor::cat(biases.to_vec(), 0))),
+            },
+            output: mha.output.clone(),
+            dropout: DropoutConfig::new(0.0).init(),
+            n_heads,
+        };
+
+        let input = Tensor::random(
+            [batch_size, seq_len, d_model],
+            Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let expected = mha.forward(MhaInput::self_attn(input.clone())).context;
+        let actual = attention.forward(input.reshape([batch_size * seq_len, d_model]), batch_size);
+
+        let expected = expected.into_data().to_vec::<f32>().unwrap();
+        let actual = actual.into_data().to_vec::<f32>().unwrap();
+        assert!(max_diff(&expected, &actual) < 1e-5);
     }
 
     #[test]
