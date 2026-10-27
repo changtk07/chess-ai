@@ -41,7 +41,7 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 
 - Input is 65 tokens: one per square (piece embedding plus square embedding), and a CLS token encoding castling rights, en passant file and the halfmove clock.
 - The board is seen from the side to move: for black it's mirrored top to bottom with the colours swapped, and moves are mirrored to match. The network learns each pattern once rather than once per colour. Chess is the same game mirrored, so the side to move isn't an input, and a position and its mirror image evaluate identically.
-- 8 pre-norm transformer blocks: 6 heads, model width 384, RMSNorm, GELU.
+- 8 pre-norm transformer blocks: 6 heads, model width 384, RMSNorm, GELU. A final RMSNorm normalizes the residual stream before the heads.
 - Policy head: 73 move planes per square, 4,672 moves in total, using the AlphaZero encoding in `src/engine/encoding.rs`. Only the legal moves' logits are gathered on the device, so the softmax and the data read back cover just those moves.
 - Value head: reads the CLS token and outputs a tanh score in [−1, 1] for the side to move.
 

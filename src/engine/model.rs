@@ -168,6 +168,9 @@ impl ValueHeadConfig {
 pub(crate) struct TransformerModel<B: Backend> {
     embedding: ChessEmbedding<B>,
     attention_blocks: Vec<AttentionBlock<B>>,
+    // The blocks normalize their inputs, so without this the residual stream would reach the
+    // heads unnormalized
+    final_norm: RmsNorm<B>,
     policy_head: PolicyHead<B>,
     value_head: ValueHead<B>,
 }
@@ -189,6 +192,7 @@ impl<B: Backend> TransformerModel<B> {
             .attention_blocks
             .iter()
             .fold(attn_input, |x, block| block.forward(x));
+        let attn_output = self.final_norm.forward(attn_output);
 
         let seq_len = attn_output.dims()[1];
         let cls_token = attn_output.clone().narrow(1, 0, 1).squeeze_dim(1); // [B, d_model]
@@ -254,6 +258,7 @@ impl TransformerModelConfig {
                         .init(device)
                 })
                 .collect(),
+            final_norm: RmsNormConfig::new(d_model).init(device),
             policy_head: PolicyHeadConfig::new().with_d_model(d_model).init(device),
             value_head: ValueHeadConfig::new().with_d_model(d_model).init(device),
         }
