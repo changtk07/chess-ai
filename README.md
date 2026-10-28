@@ -8,6 +8,7 @@ The network isn't trained yet. The engine plays complete, legal games, but with 
 
 ```sh
 cargo run --release -- self-play --backend cuda-bf16   # play 256 games at once with untrained weights
+cargo run --release -- train runs/first --backend cuda-bf16 --blocks 8 --width 256   # train, resumably
 cargo run --release -- bench     # network throughput by batch size (up to 256), and search speed
 cargo run --release -- perft 5   # count positions at depth 5 from the start, per root move
 cargo test                       # move generation, game outcome, search and self-play tests
@@ -16,6 +17,8 @@ cargo test                       # move generation, game outcome, search and sel
 `self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Both `self-play` and `bench` take `--blocks` (8) and `--width` (384, a multiple of 64) to try other network sizes. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, applying its results, and writing samples.
 
 With `--out data/selfplay.bin`, each finished game's training samples are appended to that file: one per move played, with the position, every legal move's visit count from its search, and the game's result for the side to move. Games stopped at the ply limit count as draws. The format is described in `src/engine/samples.rs`.
+
+`train` plays and trains generation after generation in a run directory, creating it on first use. Each generation's network plays `--games` games (512) at `--sims` simulations per move (200), then trains for `--steps` steps (1,000) of 256 positions drawn from the last four generations' games, and becomes the next generation. Stop it at any point and run the same command again, on this machine or another, to continue: the directory holds everything the run needs, and costs at most the games in progress and the current generation's training. Copy or sync the whole directory to move a run between machines. `--parallel` (256) and `--backend` can differ per machine; the rest of the settings are fixed when the run is created, in its `config.json`. Training always runs in f32, whatever precision self-play uses. `history.csv` gets a line per generation with its games' results and the training losses; the value loss is worth comparing with `draw_value_loss`, what always predicting a draw would score.
 
 Commands run on the CPU by default. Add `--backend cuda` to run on an NVIDIA GPU, or `cuda-f16` / `cuda-bf16` for half precision, e.g. `cargo run --release -- bench 4096 --backend cuda-f16`. The first run on a GPU spends a minute or more compiling kernels.
 
@@ -59,6 +62,12 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 - Dirichlet noise (alpha 0.3, a quarter of each prior) is mixed into every search's root priors, so games explore moves the network rates low.
 - Every move played becomes a training sample, written out when its game ends.
 
+**Training** (`src/engine/run.rs`, `src/engine/training.rs`)
+
+- Each generation's network plays its games, then trains on positions drawn at random from the latest generations' games. The policy learns each search's visit distribution, by cross-entropy, and the value each game's result, by squared error, with AdamW and gradient clipping.
+- Self-play keeps every slot busy across generations: games still going when a generation has finished its share wait while the network trains, and the next generation's network finishes them. Without that, the batch would shrink as the last games finish, and burn recompiles its kernels for every new batch size.
+- Checkpoints store the weights and optimizer state at full precision, so a run continues on any backend. Every file is written so that the process can be stopped at any point.
+
 ## Roadmap
 
 - [x] Batched leaf evaluation on a GPU backend: see [docs/performance.md](docs/performance.md)
@@ -73,8 +82,10 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
   - First measure how many of each search's visits the chosen move's subtree holds: that's the share of evaluations reuse would save.
   - A reused root is already expanded, so noise must be mixed into its existing priors. Decide whether `--sims` means new simulations per move or total visits at the root, since samples record visits.
   - Caching evaluations by Zobrist hash and halfmove clock is an alternative or a complement.
-- [ ] Training loop on the GPU:
-  - Training must pause on one machine and resume on the other. Checkpoints hold everything needed to continue (weights, optimizer state, step count, network size and position in the sample data), don't depend on the backend, precision or batch size they were saved with, and use no absolute paths.
+- [ ] Training:
+  - [x] A training loop alternating self-play and training, with runs that stop at any point and continue on either machine.
+  - [ ] A throwaway run on the laptop, to check that the network learns and to tune the run's settings.
+  - [ ] A way to measure strength, such as matches between checkpoints.
 - [ ] Once the network is trained, score unvisited moves with first-play urgency (the parent's value minus a reduction, as Leela does) instead of as draws.
 - [ ] UCI interface:
   - Print promotions as `a7a8q` rather than `a7a8=q`, together with the `play()` test helper, which matches moves by that string.

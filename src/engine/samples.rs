@@ -3,8 +3,8 @@
 //! All numbers are little-endian. A file starts with the bytes `CNDRSP` and a version byte, then
 //! holds whole games:
 //!
-//! - **Game:** the u32 generation of the network that played it (0 for untrained weights), the
-//!   u16 number of samples, then the samples, one per move played.
+//! - **Game:** the u32 generation of the network that played it, or finished it in a training run
+//!   (0 for untrained weights), the u16 number of samples, then the samples, one per move played.
 //! - **Sample:** the u8 length of the position's FEN, the FEN in ASCII, the game's result for the
 //!   side to move as an i8 (1 win, 0 draw, -1 loss), the u8 number of legal moves, then for each
 //!   legal move its u16 bits and the u16 visit count its search gave it.
@@ -19,7 +19,7 @@
 use crate::chess::moves::Move;
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::Path,
 };
 
@@ -44,25 +44,26 @@ pub(crate) struct SampleWriter {
 }
 
 impl SampleWriter {
-    /// Opens `path` for appending, creating it and its directory if needed.
+    /// Opens `path` for appending, creating it and its directory if needed. What's left of a game
+    /// cut short by a killed process is removed first, so new games follow the last complete one.
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
-        if file.metadata()?.len() == 0 {
+        let len = file.metadata()?.len();
+        if len == 0 {
             file.write_all(MAGIC)?;
             file.write_all(&[VERSION])?;
         } else {
-            let mut header = [0; MAGIC.len() + 1];
-            File::open(path)?.read_exact(&mut header)?;
-            if header[..MAGIC.len()] != MAGIC[..] || header[MAGIC.len()] != VERSION {
-                return Err(io::Error::new(
+            let contents = read_samples(path).map_err(|_| {
+                io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{} isn't a version {VERSION} sample file", path.display()),
-                ));
-            }
+                )
+            })?;
+            file.set_len(len - contents.truncated_bytes as u64)?;
         }
 
         Ok(Self { file })
@@ -94,7 +95,6 @@ impl SampleWriter {
 }
 
 /// A game as stored in a sample file.
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RecordedGame {
     pub(crate) generation: u32,
@@ -102,16 +102,13 @@ pub(crate) struct RecordedGame {
 }
 
 /// The contents of a sample file.
-#[cfg(test)]
 pub(crate) struct SampleFile {
     pub(crate) games: Vec<RecordedGame>,
     /// Bytes at the end that don't form a complete game, left by a process killed mid-write
     pub(crate) truncated_bytes: usize,
 }
 
-/// Reads every game in a file. The training loop will read data with this; for now it checks
-/// that the format round-trips.
-#[cfg(test)]
+/// Reads every complete game in a file.
 pub(crate) fn read_samples(path: &Path) -> io::Result<SampleFile> {
     let data = fs::read(path)?;
     let mut bytes = data.as_slice();
@@ -146,7 +143,6 @@ pub(crate) fn read_samples(path: &Path) -> io::Result<SampleFile> {
 }
 
 // Returns None if the bytes run out before the game ends
-#[cfg(test)]
 fn read_game(bytes: &mut &[u8]) -> io::Result<Option<RecordedGame>> {
     let Some(&[g0, g1, g2, g3, n0, n1]) = take(bytes, 6) else {
         return Ok(None);
@@ -167,7 +163,6 @@ fn read_game(bytes: &mut &[u8]) -> io::Result<Option<RecordedGame>> {
 }
 
 // Returns None if the bytes run out before the sample ends
-#[cfg(test)]
 fn read_sample(bytes: &mut &[u8]) -> io::Result<Option<Sample>> {
     let Some(&[fen_len]) = take(bytes, 1) else {
         return Ok(None);
@@ -201,7 +196,6 @@ fn read_sample(bytes: &mut &[u8]) -> io::Result<Option<Sample>> {
     }))
 }
 
-#[cfg(test)]
 fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
     let (head, rest) = bytes.split_at_checked(n)?;
     *bytes = rest;
@@ -307,6 +301,38 @@ mod tests {
         let file = read_samples(&path).unwrap();
         assert_eq!(file.games, [complete]);
         assert_eq!(file.truncated_bytes as u64, full_len - 3 - complete_len);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_cut_off_game_is_removed_before_appending() {
+        let path = temp_path("repair");
+        let complete = sample(START_FEN, 1);
+        let cut_off = sample("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 0);
+        let mut writer = SampleWriter::open(&path).unwrap();
+        writer
+            .write_game(UNTRAINED, std::slice::from_ref(&complete))
+            .unwrap();
+        writer.write_game(UNTRAINED, &[cut_off]).unwrap();
+        let full_len = fs::metadata(&path).unwrap().len();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(full_len - 3)
+            .unwrap();
+
+        // A later run appends after the last complete game, not after the cut-off one
+        let appended = sample("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", -1);
+        SampleWriter::open(&path)
+            .unwrap()
+            .write_game(2, std::slice::from_ref(&appended))
+            .unwrap();
+
+        let file = read_samples(&path).unwrap();
+        let games: Vec<_> = file.games.iter().map(|game| &game.samples).collect();
+        assert_eq!(games, [&vec![complete], &vec![appended]]);
+        assert_eq!(file.truncated_bytes, 0);
         fs::remove_file(&path).unwrap();
     }
 

@@ -345,11 +345,15 @@ impl TransformerModelConfig {
 /// test the code around it.
 #[cfg(test)]
 pub(crate) fn tiny_model() -> TransformerModel<burn::backend::NdArray> {
+    tiny_model_config().init(&Default::default())
+}
+
+#[cfg(test)]
+pub(crate) fn tiny_model_config() -> TransformerModelConfig {
     TransformerModelConfig::new()
         .with_n_blocks(1)
         .with_n_heads(2)
         .with_head_dimension(16)
-        .init(&Default::default())
 }
 
 #[cfg(test)]

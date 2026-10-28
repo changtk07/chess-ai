@@ -197,94 +197,145 @@ impl Game {
     }
 }
 
-/// Plays `n_games` games, `n_parallel` at a time. Each step, every game's search advances to a
-/// position that needs the network, all of those positions are evaluated in one batch, and each
-/// search takes in its result. `on_game` receives each finished game with its training samples,
-/// and `on_progress` is called every few seconds. Games stopped at the ply limit count as draws.
-///
-/// The tree work runs on one thread. It takes about 2% of each step, and a thread pool measured
-/// slower overall: dispatching thousands of microsecond tasks costs more than it saves, and even
-/// the network calls got slower, likely from idle workers competing with the thread driving the GPU.
+/// Plays `n_games` games, `n_parallel` at a time, with one network. See `SelfPlay::play`.
 pub(crate) fn run<B: Backend>(
     model: &TransformerModel<B>,
     mcts_config: &MctsConfig,
     config: &SelfPlayConfig,
     device: &B::Device,
-    mut on_game: impl FnMut(&GameRecord, Vec<Sample>),
-    mut on_progress: impl FnMut(&SelfPlayStats),
+    on_game: impl FnMut(&GameRecord, Vec<Sample>),
+    on_progress: impl FnMut(&SelfPlayStats),
 ) -> SelfPlayStats {
-    let start = Instant::now();
-    let mut last_progress = start;
-    let mut stats = SelfPlayStats::default();
+    SelfPlay::new(mcts_config, config).play(model, usize::MAX, device, on_game, on_progress)
+}
 
-    let n_slots = config.n_parallel.min(config.n_games);
-    let mut seeds = StdRng::seed_from_u64(config.seed);
-    let mut games: Vec<Game> = (0..n_slots)
-        .map(|_| Game::new(mcts_config, seeds.random()))
-        .collect();
-    let mut n_started = n_slots;
-    let mut finished_sims = 0;
+/// Games in progress, one per slot. A finished game's slot starts a new one until `n_games` have
+/// started, then empties. Games still going when `play` returns wait for the next call, which may
+/// bring a newer network.
+pub(crate) struct SelfPlay {
+    config: SelfPlayConfig,
+    games: Vec<Game>,
+    n_started: usize,
+    // Simulations in the games finished so far
+    finished_sims: usize,
+}
 
-    loop {
-        let select_start = Instant::now();
-        let mut on_game_time = Duration::ZERO;
-        let mut i = 0;
-        while i < games.len() {
-            let Some((record, samples)) = games[i].advance(config) else {
-                i += 1;
-                continue;
-            };
-            let on_game_start = Instant::now();
-            on_game(&record, samples);
-            on_game_time += on_game_start.elapsed();
-            stats.games.push(record);
-            finished_sims += games[i].n_sims;
-
-            if n_started == config.n_games {
-                games.remove(i);
-                continue;
-            }
-
-            // The new game in this slot needs its first position evaluated too
-            games[i].restart();
-            n_started += 1;
-            let record = games[i].advance(config);
-            debug_assert!(
-                record.is_none(),
-                "a new game can't end before its first move"
-            );
-            i += 1;
-        }
-        stats.select_time += select_start.elapsed() - on_game_time;
-        stats.on_game_time += on_game_time;
-
-        if games.is_empty() {
-            break;
-        }
-
-        let evaluate_start = Instant::now();
-        let states: Vec<&State> = games.iter().map(|game| &game.state).collect();
-        let moves: Vec<&[Move]> = games.iter().map(|game| game.search.leaf_moves()).collect();
-        let evaluations = model.evaluate(&states, &moves, device);
-        stats.evaluate_time += evaluate_start.elapsed();
-        stats.n_evaluations += evaluations.len();
-        stats.n_steps += 1;
-
-        let apply_start = Instant::now();
-        for (game, evaluation) in games.iter_mut().zip(evaluations) {
-            game.apply(evaluation, config);
-        }
-        stats.apply_time += apply_start.elapsed();
-
-        if last_progress.elapsed() >= PROGRESS_INTERVAL {
-            update_totals(&mut stats, &games, finished_sims, start);
-            on_progress(&stats);
-            last_progress = Instant::now();
+impl SelfPlay {
+    pub(crate) fn new(mcts_config: &MctsConfig, config: &SelfPlayConfig) -> Self {
+        let n_slots = config.n_parallel.min(config.n_games);
+        let mut seeds = StdRng::seed_from_u64(config.seed);
+        Self {
+            config: config.clone(),
+            games: (0..n_slots)
+                .map(|_| Game::new(mcts_config, seeds.random()))
+                .collect(),
+            n_started: n_slots,
+            finished_sims: 0,
         }
     }
 
-    update_totals(&mut stats, &games, finished_sims, start);
-    stats
+    /// Plays with `model` until `n_finish` more games end or every game is done. Each step, every
+    /// game's search advances to a position that needs the network, all of those positions are
+    /// evaluated in one batch, and each search takes in its result. `on_game` receives each
+    /// finished game with its training samples, and `on_progress` is called every few seconds with
+    /// the stats of this call. Games stopped at the ply limit count as draws.
+    ///
+    /// The tree work runs on one thread. It takes about 2% of each step, and a thread pool measured
+    /// slower overall: dispatching thousands of microsecond tasks costs more than it saves, and
+    /// even the network calls got slower, likely from idle workers competing with the thread
+    /// driving the GPU.
+    pub(crate) fn play<B: Backend>(
+        &mut self,
+        model: &TransformerModel<B>,
+        n_finish: usize,
+        device: &B::Device,
+        mut on_game: impl FnMut(&GameRecord, Vec<Sample>),
+        mut on_progress: impl FnMut(&SelfPlayStats),
+    ) -> SelfPlayStats {
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut stats = SelfPlayStats::default();
+        let sims_before = self.total_sims();
+        let config = &self.config;
+
+        // Stops after applying evaluations, so no game is left waiting for one
+        while !self.games.is_empty() && stats.games.len() < n_finish {
+            let select_start = Instant::now();
+            let mut on_game_time = Duration::ZERO;
+            let mut i = 0;
+            while i < self.games.len() {
+                let Some((record, samples)) = self.games[i].advance(config) else {
+                    i += 1;
+                    continue;
+                };
+                let on_game_start = Instant::now();
+                on_game(&record, samples);
+                on_game_time += on_game_start.elapsed();
+                stats.games.push(record);
+                self.finished_sims += self.games[i].n_sims;
+
+                if self.n_started == config.n_games {
+                    self.games.remove(i);
+                    continue;
+                }
+
+                // The new game in this slot needs its first position evaluated too
+                self.games[i].restart();
+                self.n_started += 1;
+                let record = self.games[i].advance(config);
+                debug_assert!(
+                    record.is_none(),
+                    "a new game can't end before its first move"
+                );
+                i += 1;
+            }
+            stats.select_time += select_start.elapsed() - on_game_time;
+            stats.on_game_time += on_game_time;
+
+            if self.games.is_empty() {
+                break;
+            }
+
+            let evaluate_start = Instant::now();
+            let states: Vec<&State> = self.games.iter().map(|game| &game.state).collect();
+            let moves: Vec<&[Move]> = self
+                .games
+                .iter()
+                .map(|game| game.search.leaf_moves())
+                .collect();
+            let evaluations = model.evaluate(&states, &moves, device);
+            stats.evaluate_time += evaluate_start.elapsed();
+            stats.n_evaluations += evaluations.len();
+            stats.n_steps += 1;
+
+            let apply_start = Instant::now();
+            for (game, evaluation) in self.games.iter_mut().zip(evaluations) {
+                game.apply(evaluation, config);
+            }
+            stats.apply_time += apply_start.elapsed();
+
+            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                stats.n_sims = self.total_sims() - sims_before;
+                stats.elapsed = start.elapsed();
+                on_progress(&stats);
+                last_progress = Instant::now();
+            }
+        }
+
+        stats.n_sims = self.total_sims() - sims_before;
+        stats.elapsed = start.elapsed();
+        stats
+    }
+
+    // Simulations run so far, including in games still going
+    fn total_sims(&self) -> usize {
+        let ongoing: usize = self
+            .games
+            .iter()
+            .map(|game| game.n_sims + game.search.n_sims_done())
+            .sum();
+        self.finished_sims + ongoing
+    }
 }
 
 /// Mixes Dirichlet(alpha) noise into `priors`, which keep summing to 1. The noise is drawn by
@@ -302,14 +353,28 @@ fn add_noise(priors: &mut [f32], alpha: f32, fraction: f32, rng: &mut impl Rng) 
     }
 }
 
-fn update_totals(stats: &mut SelfPlayStats, games: &[Game], finished_sims: usize, start: Instant) {
-    let ongoing_sims: usize = games
-        .iter()
-        .map(|game| game.n_sims + game.search.n_sims_done())
-        .sum();
-    stats.n_sims = finished_sims + ongoing_sims;
+/// Rates over the interval since `previous`, and where that time went.
+pub(crate) fn progress_line(current: &SelfPlayStats, previous: &SelfPlayStats) -> String {
+    let seconds = (current.elapsed - previous.elapsed).as_secs_f64();
+    let evaluations = (current.n_evaluations - previous.n_evaluations) as f64;
+    let steps = (current.n_steps - previous.n_steps) as f64;
+    let share = |now: std::time::Duration, before: std::time::Duration| {
+        100.0 * (now - before).as_secs_f64() / seconds
+    };
 
-    stats.elapsed = start.elapsed();
+    format!(
+        "{:>5.0}s  games {:>4}  {:>6.0} sims/s  {:>6.0} evals/s  batch {:>5.1}  \
+         time: select {:>4.1}%, network {:>4.1}%, apply {:>4.1}%, write {:>4.1}%",
+        current.elapsed.as_secs_f64(),
+        current.games.len(),
+        (current.n_sims - previous.n_sims) as f64 / seconds,
+        evaluations / seconds,
+        evaluations / steps,
+        share(current.select_time, previous.select_time),
+        share(current.evaluate_time, previous.evaluate_time),
+        share(current.apply_time, previous.apply_time),
+        share(current.on_game_time, previous.on_game_time),
+    )
 }
 
 #[cfg(test)]

@@ -7,15 +7,25 @@ use crate::{
     engine::{
         mcts::MctsConfig,
         model::TransformerModelConfig,
+        run::{self as training_run, Run, RunConfig},
         samples::{SampleWriter, UNTRAINED},
-        self_play::{self as self_play_driver, GameResult, SelfPlayConfig, SelfPlayStats},
+        self_play::{
+            self as self_play_driver, progress_line, GameResult, SelfPlayConfig, SelfPlayStats,
+        },
     },
 };
 use burn::{
-    backend::{Cuda, NdArray},
-    tensor::{backend::Backend, bf16, f16},
+    backend::{Autodiff, Cuda, NdArray},
+    tensor::{
+        backend::{AutodiffBackend, Backend},
+        bf16, f16,
+    },
 };
-use std::{path::Path, str::FromStr, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Instant,
+};
 
 const USAGE: &str = "\
 Usage: cinder <command> [--backend cpu|cuda|cuda-f16|cuda-bf16]
@@ -24,15 +34,39 @@ Commands:
   self-play [--parallel 256] [--sims 800] [--games 256] [--seed 0] [--out file]
                       play games with untrained weights, reporting throughput and
                       appending each finished game's training samples to the file
+  train <dir> [--parallel 256] [--generations N]
+                      play and train generation after generation in the run in dir,
+                      creating it if needed. Stop it any time, then run the same
+                      command, here or on another machine, to continue. Training runs
+                      in f32; --backend sets self-play's precision. A new run also takes
+                      [--games 512] [--sims 200] [--steps 1000] [--seed 0]
   bench [max_batch]   network throughput by batch size, then search speed
   perft [depth]       count positions from the start, per root move
 
-self-play and bench also take the network's size: [--blocks 8] [--width 384],
-where the width is a multiple of 64";
+self-play, bench and new runs also take the network's size: [--blocks 8]
+[--width 384], where the width is a multiple of 64";
+
+// Settings a run fixes when it's created
+const RUN_OPTIONS: [&str; 6] = [
+    "--blocks", "--width", "--games", "--sims", "--steps", "--seed",
+];
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let backend = take_option(&mut args, "--backend").unwrap_or_else(|| "cpu".into());
+
+    // Training runs in f32 on the same device, whatever precision self-play uses
+    if args.first().is_some_and(|command| command == "train") {
+        args.remove(0);
+        match backend.as_str() {
+            "cpu" => train::<NdArray, Autodiff<NdArray>>(args),
+            "cuda" => train::<Cuda, Autodiff<Cuda>>(args),
+            "cuda-f16" => train::<Cuda<f16>, Autodiff<Cuda>>(args),
+            "cuda-bf16" => train::<Cuda<bf16>, Autodiff<Cuda>>(args),
+            other => usage_error(&format!("unknown backend {other}")),
+        }
+        return;
+    }
 
     match backend.as_str() {
         "cpu" => run::<NdArray>(args, &Default::default()),
@@ -134,6 +168,71 @@ fn perft(depth: u8) {
     println!("Time taken: {:?}", elapsed);
 }
 
+// Self-play on backend P and training on T, on their default devices: the same GPU for CUDA
+fn train<P: Backend, T: AutodiffBackend>(mut args: Vec<String>) {
+    let (play_device, train_device) = (&Default::default(), &Default::default());
+    let dir = match args.first() {
+        Some(dir) if !dir.starts_with("--") => PathBuf::from(args.remove(0)),
+        _ => usage_error("train needs a run directory"),
+    };
+    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 256);
+    let n_generations: Option<usize> =
+        take_option(&mut args, "--generations").map(|value| parse("--generations", &value));
+    if n_parallel == 0 {
+        usage_error("--parallel must be at least 1");
+    }
+
+    let run = if Run::exists(&dir) {
+        if let Some(option) = RUN_OPTIONS
+            .iter()
+            .find(|&&option| args.iter().any(|arg| arg == option))
+        {
+            usage_error(&format!(
+                "{option} is fixed when a run is created; edit {} to change the run's settings",
+                dir.join("config.json").display()
+            ));
+        }
+        reject_leftovers(&args);
+        Run::open(&dir)
+    } else {
+        let mut config = RunConfig::new(take_model_config(&mut args));
+        config.games_per_generation =
+            take_parsed_option(&mut args, "--games", config.games_per_generation);
+        config.n_sims = take_parsed_option(&mut args, "--sims", config.n_sims);
+        config.steps_per_generation =
+            take_parsed_option(&mut args, "--steps", config.steps_per_generation);
+        config.seed = take_parsed_option(&mut args, "--seed", config.seed);
+        reject_leftovers(&args);
+
+        if config.games_per_generation == 0 || config.steps_per_generation == 0 {
+            usage_error("--games and --steps must be at least 1");
+        }
+        // The first simulation only expands the root, and samples store visit counts in 16 bits
+        if !(2..=u16::MAX as usize).contains(&config.n_sims) {
+            usage_error(&format!("--sims must be from 2 to {}", u16::MAX));
+        }
+        println!("Starting a new run in {}", dir.display());
+        Run::create::<T>(&dir, config, train_device)
+    }
+    .unwrap_or_else(|error| fail(&error));
+
+    println!(
+        "Self-play on {}, {n_parallel} games at a time; training on {}; network of {} blocks, \
+         width {}",
+        P::name(play_device),
+        T::name(train_device),
+        run.config.model.n_blocks,
+        run.config.model.d_model()
+    );
+    training_run::train::<P, T>(&run, n_parallel, n_generations, play_device, train_device)
+        .unwrap_or_else(|error| fail(&error));
+}
+
+fn fail(error: &std::io::Error) -> ! {
+    eprintln!("error: {error}");
+    std::process::exit(1);
+}
+
 fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
     let model_config = take_model_config(&mut args);
     let out = take_option(&mut args, "--out");
@@ -189,7 +288,7 @@ fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
             }
         },
         |stats| {
-            print_progress(stats, &previous);
+            println!("{}", progress_line(stats, &previous));
             previous = stats.clone();
         },
     );
@@ -211,33 +310,11 @@ fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
         count(GameResult::PlyLimit),
         total_plies as f64 / stats.games.len() as f64,
     );
-    print!("Overall: ");
-    print_progress(&stats, &SelfPlayStats::default());
+    println!(
+        "Overall: {}",
+        progress_line(&stats, &SelfPlayStats::default())
+    );
     if let Some(path) = out {
         println!("{n_samples} samples appended to {path}");
     }
-}
-
-// Rates over the interval since `previous`, and where that time went
-fn print_progress(current: &SelfPlayStats, previous: &SelfPlayStats) {
-    let seconds = (current.elapsed - previous.elapsed).as_secs_f64();
-    let evaluations = (current.n_evaluations - previous.n_evaluations) as f64;
-    let steps = (current.n_steps - previous.n_steps) as f64;
-    let share = |now: std::time::Duration, before: std::time::Duration| {
-        100.0 * (now - before).as_secs_f64() / seconds
-    };
-
-    println!(
-        "{:>5.0}s  games {:>4}  {:>6.0} sims/s  {:>6.0} evals/s  batch {:>5.1}  \
-         time: select {:>4.1}%, network {:>4.1}%, apply {:>4.1}%, write {:>4.1}%",
-        current.elapsed.as_secs_f64(),
-        current.games.len(),
-        (current.n_sims - previous.n_sims) as f64 / seconds,
-        evaluations / seconds,
-        evaluations / steps,
-        share(current.select_time, previous.select_time),
-        share(current.evaluate_time, previous.evaluate_time),
-        share(current.apply_time, previous.apply_time),
-        share(current.on_game_time, previous.on_game_time),
-    );
 }
