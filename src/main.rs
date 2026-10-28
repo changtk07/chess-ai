@@ -40,6 +40,9 @@ Commands:
                       command, here or on another machine, to continue. Training runs
                       in f32; --backend sets self-play's precision. A new run also takes
                       [--games 512] [--sims 200] [--steps 1000] [--seed 0]
+  match <dir> <generation> <generation> [--games 128] [--sims 50] [--parallel 128]
+                      play two of a run's kept networks against each other, and
+                      report the first's score
   bench [max_batch]   network throughput by batch size, then search speed
   perft [depth]       count positions from the start, per root move
 
@@ -96,6 +99,7 @@ fn run<B: Backend>(mut args: Vec<String>, device: &B::Device) {
             bench::run::<B>(device, &model_config, max_batch_size);
         }
         "self-play" => self_play::<B>(args, device),
+        "match" => play_match::<B>(args, device),
         other => usage_error(&format!("unknown command {other}")),
     }
 }
@@ -130,6 +134,14 @@ fn take_model_config(args: &mut Vec<String>) -> TransformerModelConfig {
     }
     config.n_heads = width / config.head_dimension;
     config
+}
+
+// Takes the first argument, which must be there and not an option
+fn take_required<T: FromStr>(args: &mut Vec<String>, name: &str) -> T {
+    match args.first() {
+        Some(value) if !value.starts_with("--") => parse(name, &args.remove(0)),
+        _ => usage_error(&format!("missing {name}")),
+    }
 }
 
 // Takes the first argument if it isn't an option
@@ -226,6 +238,41 @@ fn train<P: Backend, T: AutodiffBackend>(mut args: Vec<String>) {
     );
     training_run::train::<P, T>(&run, n_parallel, n_generations, play_device, train_device)
         .unwrap_or_else(|error| fail(&error));
+}
+
+fn play_match<B: Backend>(mut args: Vec<String>, device: &B::Device) {
+    let dir: PathBuf = take_required(&mut args, "run directory");
+    let first: usize = take_required(&mut args, "first generation");
+    let second: usize = take_required(&mut args, "second generation");
+    let games: usize = take_parsed_option(&mut args, "--games", 128);
+    let n_sims: usize = take_parsed_option(&mut args, "--sims", 50);
+    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 128);
+    reject_leftovers(&args);
+    if games == 0 || n_parallel == 0 || n_sims < 2 {
+        usage_error("--games and --parallel must be at least 1, and --sims at least 2");
+    }
+
+    let run = Run::open(&dir).unwrap_or_else(|error| fail(&error));
+    let start = Instant::now();
+    let score = training_run::play_generations::<B>(
+        &run,
+        [first, second],
+        games,
+        n_sims,
+        n_parallel.min(games),
+        device,
+    )
+    .unwrap_or_else(|error| fail(&error));
+    println!(
+        "Generation {first} against {second}: {} wins, {} draws, {} losses, scoring {:.3}, \
+         {:+.0} Elo, in {:.0}s",
+        score.wins,
+        score.draws,
+        score.losses,
+        score.score(),
+        score.elo(),
+        start.elapsed().as_secs_f64()
+    );
 }
 
 fn fail(error: &std::io::Error) -> ! {

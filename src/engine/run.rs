@@ -4,10 +4,12 @@
 //! - `config.json`: the run's settings, written when it's created. They can be edited between
 //!   sessions, except for the network size, which the checkpoints must match.
 //! - `checkpoints/NNNNN/`: the network after NNNNN generations of training, with its optimizer
-//!   state, at full precision whatever backend wrote it. The latest two are kept.
+//!   state, at full precision whatever backend wrote it. The latest two are kept, and generation
+//!   0's untrained network as a fixed reference.
 //! - `samples/NNNNN.bin`: the games generation NNNNN's network played, in the format described in
 //!   `samples.rs`. The file is complete once checkpoint NNNNN + 1 exists, and never changes after.
-//! - `history.csv`: a line per generation trained.
+//! - `history.csv`: a line per generation trained: its games' results, its training losses, and
+//!   how the network it trained did against it.
 //!
 //! Games keep their slots across generations, so every batch of positions stays full: once a
 //! generation has finished its games, the games still going wait while the network trains, and the
@@ -20,9 +22,10 @@
 
 use crate::engine::{
     mcts::MctsConfig,
+    model::TransformerModel,
     model::TransformerModelConfig,
     samples::{read_samples, Sample, SampleWriter},
-    self_play::{progress_line, SelfPlay, SelfPlayConfig, SelfPlayStats},
+    self_play::{play_match, progress_line, MatchScore, SelfPlay, SelfPlayConfig, SelfPlayStats},
     training::{load_model, Losses, Trainer},
 };
 use burn::{
@@ -70,6 +73,13 @@ pub(crate) struct RunConfig {
     pub(crate) warmup_steps: usize,
     #[config(default = 1e-4)]
     pub(crate) weight_decay: f32,
+    /// Games each newly trained network plays against the one it was trained from, to measure
+    /// progress; 0 to skip
+    #[config(default = 128)]
+    pub(crate) eval_games: usize,
+    /// Simulations per move in those games, fewer than in self-play to keep them cheap
+    #[config(default = 50)]
+    pub(crate) eval_sims: usize,
     /// Fixes the initial weights, and with the generation, every game's random choices
     #[config(default = 0)]
     pub(crate) seed: u64,
@@ -112,12 +122,24 @@ impl Run {
         Ok(run)
     }
 
+    /// Opens the run in `dir`. Settings added since its `config.json` was written take their
+    /// defaults.
     pub(crate) fn open(dir: &Path) -> io::Result<Self> {
-        let config = RunConfig::load(dir.join(CONFIG_FILE))
-            .map_err(|error| io::Error::other(format!("can't read {}: {error:?}", CONFIG_FILE)))?;
+        let invalid = |error: serde_json::Error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("can't read {CONFIG_FILE}: {error}"),
+            )
+        };
+        let saved =
+            serde_json::from_str(&fs::read_to_string(dir.join(CONFIG_FILE))?).map_err(invalid)?;
+        let defaults = RunConfig::new(TransformerModelConfig::new());
+        let mut config = serde_json::to_value(&defaults).map_err(invalid)?;
+        overlay(&mut config, saved);
+
         Ok(Self {
             dir: dir.to_path_buf(),
-            config,
+            config: serde_json::from_value(config).map_err(invalid)?,
         })
     }
 
@@ -134,6 +156,21 @@ impl Run {
         latest.ok_or_else(|| io::Error::other("the run has no checkpoints"))
     }
 
+    /// Loads generation `generation`'s network, if its checkpoint is still kept.
+    pub(crate) fn load_network<B: Backend>(
+        &self,
+        generation: usize,
+        device: &B::Device,
+    ) -> io::Result<TransformerModel<B>> {
+        load_model::<B>(&self.config.model, &self.checkpoint_dir(generation), device).map_err(
+            |error| {
+                io::Error::other(format!(
+                    "can't load generation {generation}'s checkpoint: {error:?}"
+                ))
+            },
+        )
+    }
+
     fn checkpoint_dir(&self, generation: usize) -> PathBuf {
         self.dir
             .join("checkpoints")
@@ -147,7 +184,7 @@ impl Run {
     }
 
     // Writes the checkpoint under a temporary name and renames it, so a checkpoint either exists
-    // whole or not at all, then deletes all but the latest two
+    // whole or not at all, then deletes all but generation 0 and the latest two
     fn save_checkpoint<B: AutodiffBackend>(
         &self,
         trainer: &Trainer<B>,
@@ -164,13 +201,31 @@ impl Run {
             .map_err(|error| io::Error::other(format!("can't save checkpoint: {error:?}")))?;
         fs::rename(&temporary, &dir)?;
 
-        for old in 0..generation.saturating_sub(1) {
+        for old in 1..generation.saturating_sub(1) {
             let old = self.checkpoint_dir(old);
             if old.exists() {
                 fs::remove_dir_all(old)?;
             }
         }
         Ok(())
+    }
+}
+
+// Replaces `defaults`' values with those in `saved`, object by object, keeping defaults that
+// `saved` lacks
+fn overlay(defaults: &mut serde_json::Value, saved: serde_json::Value) {
+    match (defaults, saved) {
+        (serde_json::Value::Object(defaults), serde_json::Value::Object(saved)) => {
+            for (key, value) in saved {
+                match defaults.get_mut(&key) {
+                    Some(default) => overlay(default, value),
+                    None => {
+                        defaults.insert(key, value);
+                    }
+                }
+            }
+        }
+        (default, saved) => *default = saved,
     }
 }
 
@@ -203,7 +258,10 @@ pub(crate) fn train<P: Backend, T: AutodiffBackend>(
     let mut generation = first;
     while end.is_none_or(|end| generation < end) {
         play_generation::<P>(run, generation, &mut games, play_device)?;
-        let summary = train_generation::<T>(run, generation, train_device)?;
+        let mut summary = train_generation::<T>(run, generation, train_device)?;
+        if config.eval_games > 0 {
+            summary.eval = Some(evaluate::<P>(run, generation + 1, n_parallel, play_device)?);
+        }
         append_history(run, &summary)?;
         generation += 1;
     }
@@ -236,8 +294,7 @@ fn play_generation<P: Backend>(
             String::new()
         }
     );
-    let model = load_model::<P>(&config.model, &run.checkpoint_dir(generation), device)
-        .map_err(|error| io::Error::other(format!("can't load checkpoint: {error:?}")))?;
+    let model = run.load_network::<P>(generation, device)?;
     let mut writer = SampleWriter::open(&path)?;
 
     let mut previous = SelfPlayStats::default();
@@ -270,6 +327,8 @@ struct GenerationSummary {
     /// The value loss of always predicting a draw: the share of the window's positions from
     /// decisive games
     draw_value_loss: f32,
+    /// The trained network's score against the one it was trained from
+    eval: Option<MatchScore>,
 }
 
 #[derive(Default)]
@@ -367,7 +426,75 @@ fn train_generation<T: AutodiffBackend>(
         games,
         losses: Losses::mean(&losses),
         draw_value_loss,
+        eval: None,
     })
+}
+
+/// Sampling plies in evaluation games: enough for games to differ, few enough for both networks
+/// to play their best moves after the opening
+pub(crate) const EVAL_SAMPLING_PLIES: usize = 8;
+
+/// Plays `games` games between generations `first` and `second`, without root noise, returning the
+/// first's score.
+pub(crate) fn play_generations<P: Backend>(
+    run: &Run,
+    [first, second]: [usize; 2],
+    games: usize,
+    n_sims: usize,
+    n_parallel: usize,
+    device: &P::Device,
+) -> io::Result<MatchScore> {
+    let networks = [
+        run.load_network::<P>(first, device)?,
+        run.load_network::<P>(second, device)?,
+    ];
+    let config = SelfPlayConfig::new()
+        .with_n_parallel(n_parallel)
+        .with_n_games(games)
+        .with_max_plies(run.config.max_plies)
+        .with_sampling_plies(EVAL_SAMPLING_PLIES)
+        .with_noise_fraction(0.0)
+        .with_seed(derive_seed(
+            run.config.seed,
+            &[EVALUATION, first as u64, second as u64],
+        ));
+    Ok(play_match(
+        [&networks[0], &networks[1]],
+        &MctsConfig::new().with_n_sims(n_sims),
+        &config,
+        device,
+    ))
+}
+
+// Plays the newly trained `generation` against the one before it
+fn evaluate<P: Backend>(
+    run: &Run,
+    generation: usize,
+    n_parallel: usize,
+    device: &P::Device,
+) -> io::Result<MatchScore> {
+    let config = &run.config;
+    let start = Instant::now();
+    let score = play_generations::<P>(
+        run,
+        [generation, generation - 1],
+        config.eval_games,
+        config.eval_sims,
+        n_parallel.min(config.eval_games),
+        device,
+    )?;
+    println!(
+        "Generation {generation} against {}: {} wins, {} draws, {} losses at {} simulations per \
+         move, {:+.0} Elo, in {:.0}s",
+        generation - 1,
+        score.wins,
+        score.draws,
+        score.losses,
+        config.eval_sims,
+        score.elo(),
+        start.elapsed().as_secs_f64()
+    );
+    Ok(score)
 }
 
 fn describe(losses: &Losses) -> String {
@@ -403,7 +530,8 @@ fn append_history(run: &Run, summary: &GenerationSummary) -> io::Result<()> {
         writeln!(
             file,
             "generation,games,white_wins,black_wins,draws,average_plies,\
-             policy_loss,target_entropy,value_loss,draw_value_loss"
+             policy_loss,target_entropy,value_loss,draw_value_loss,\
+             eval_wins,eval_draws,eval_losses,eval_elo"
         )?;
     }
 
@@ -412,11 +540,21 @@ fn append_history(run: &Run, summary: &GenerationSummary) -> io::Result<()> {
         games,
         losses,
         draw_value_loss,
+        eval,
     } = summary;
     let average_plies = games.plies as f64 / games.total().max(1) as f64;
+    let eval = eval.map_or(",,,".to_string(), |score| {
+        format!(
+            "{},{},{},{:.0}",
+            score.wins,
+            score.draws,
+            score.losses,
+            score.elo()
+        )
+    });
     writeln!(
         file,
-        "{generation},{},{},{},{},{average_plies:.1},{:.4},{:.4},{:.4},{draw_value_loss:.4}",
+        "{generation},{},{},{},{},{average_plies:.1},{:.4},{:.4},{:.4},{draw_value_loss:.4},{eval}",
         games.total(),
         games.white_wins,
         games.black_wins,
@@ -440,6 +578,7 @@ fn append_history(run: &Run, summary: &GenerationSummary) -> io::Result<()> {
 // Streams of random numbers the seed is split into
 const SELF_PLAY: u64 = 0;
 const TRAINING: u64 = 1;
+const EVALUATION: u64 = 2;
 
 // A seed for one part of the run, mixing in `parts` with SplitMix64's finalizer, so that no two
 // generations or parts share a stream
@@ -475,6 +614,8 @@ mod tests {
             .with_batch_size(8)
             .with_window_generations(2)
             .with_warmup_steps(1)
+            .with_eval_games(2)
+            .with_eval_sims(4)
     }
 
     fn train_generations(run: &Run, n: usize) {
@@ -513,7 +654,8 @@ mod tests {
         assert_eq!(run.latest_generation().unwrap(), 1);
         train_generations(&run, 2);
 
-        assert_eq!(checkpoints(&dir), ["00002", "00003"]);
+        // Generation 0 stays as a reference
+        assert_eq!(checkpoints(&dir), ["00000", "00002", "00003"]);
         assert_generation(&dir.join("samples/00001.bin"), 1);
         assert_generation(&dir.join("samples/00002.bin"), 2);
         let history = fs::read_to_string(dir.join(HISTORY_FILE)).unwrap();
@@ -521,6 +663,14 @@ mod tests {
         assert_eq!(lines.len(), 4);
         for (generation, line) in lines[1..].iter().enumerate() {
             assert!(line.starts_with(&format!("{generation},")), "{line}");
+            // Each generation's evaluation played its 2 games
+            let eval: Vec<usize> = line
+                .split(',')
+                .skip(10)
+                .take(3)
+                .map(|n| n.parse().unwrap())
+                .collect();
+            assert_eq!(eval.iter().sum::<usize>(), 2, "{line}");
         }
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -559,6 +709,31 @@ mod tests {
         assert_eq!(file.games[0].samples, game);
         assert_eq!(file.truncated_bytes, 0);
         assert_eq!(checkpoints(&dir), ["00000", "00001"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn settings_missing_from_an_older_config_take_their_defaults() {
+        let dir = temp_dir("older");
+        Run::create::<T>(&dir, tiny_config().with_eval_games(5), &Default::default()).unwrap();
+        let path = dir.join(CONFIG_FILE);
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // As if written before these settings existed
+        saved.as_object_mut().unwrap().remove("eval_sims");
+        saved["model"]
+            .as_object_mut()
+            .unwrap()
+            .remove("attention_dropout");
+        fs::write(&path, saved.to_string()).unwrap();
+
+        let config = Run::open(&dir).unwrap().config;
+        assert_eq!(
+            config.eval_sims,
+            RunConfig::new(tiny_model_config()).eval_sims
+        );
+        assert_eq!(config.eval_games, 5);
+        assert_eq!(config.model.n_blocks, 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -151,6 +151,16 @@ impl Game {
         None
     }
 
+    // Which of two networks the current search is for, given the one playing white: the side to
+    // move at the search's root, which changes every ply
+    fn network_to_move(&self, white: usize) -> usize {
+        if self.ply.is_multiple_of(2) {
+            white
+        } else {
+            1 - white
+        }
+    }
+
     fn apply(&mut self, mut evaluation: Evaluation, config: &SelfPlayConfig) {
         if self.search.leaf_is_root() && config.noise_fraction > 0.0 {
             add_noise(
@@ -338,6 +348,110 @@ impl SelfPlay {
     }
 }
 
+/// A match's result for its first network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MatchScore {
+    pub(crate) wins: usize,
+    pub(crate) draws: usize,
+    pub(crate) losses: usize,
+}
+
+impl MatchScore {
+    pub(crate) fn games(&self) -> usize {
+        self.wins + self.draws + self.losses
+    }
+
+    /// Points per game, a draw counting half.
+    pub(crate) fn score(&self) -> f64 {
+        (self.wins as f64 + 0.5 * self.draws as f64) / self.games().max(1) as f64
+    }
+
+    /// The Elo difference the score implies. A clean sweep would imply an infinite one, so the
+    /// score is kept half a game away from 0 and 1.
+    pub(crate) fn elo(&self) -> f64 {
+        let margin = 0.5 / self.games().max(1) as f64;
+        let score = self.score().clamp(margin, 1.0 - margin);
+        400.0 * (score / (1.0 - score)).log10()
+    }
+}
+
+/// Plays `config.n_games` games between two networks, `config.n_parallel` at a time, the first
+/// network playing white in every other game, and returns the first network's score. Each search
+/// uses only the network whose move it's for. Root noise and move sampling follow `config`, which
+/// should keep a few plies of sampling so that the games differ.
+pub(crate) fn play_match<B: Backend>(
+    networks: [&TransformerModel<B>; 2],
+    mcts_config: &MctsConfig,
+    config: &SelfPlayConfig,
+    device: &B::Device,
+) -> MatchScore {
+    let n_slots = config.n_parallel.min(config.n_games);
+    let mut seeds = StdRng::seed_from_u64(config.seed);
+    // Each game, with the index of the network playing white
+    let mut games: Vec<(Game, usize)> = (0..n_slots)
+        .map(|i| (Game::new(mcts_config, seeds.random()), i % 2))
+        .collect();
+    let mut n_started = n_slots;
+    let mut score = MatchScore::default();
+
+    loop {
+        let mut i = 0;
+        while i < games.len() {
+            let Some((record, _)) = games[i].0.advance(config) else {
+                i += 1;
+                continue;
+            };
+            let white = games[i].1;
+            match record.result {
+                GameResult::WhiteWins if white == 0 => score.wins += 1,
+                GameResult::BlackWins if white == 1 => score.wins += 1,
+                GameResult::WhiteWins | GameResult::BlackWins => score.losses += 1,
+                GameResult::Draw | GameResult::PlyLimit => score.draws += 1,
+            }
+
+            if n_started == config.n_games {
+                games.remove(i);
+                continue;
+            }
+            let (game, white) = &mut games[i];
+            game.restart();
+            *white = n_started % 2;
+            n_started += 1;
+            let record = game.advance(config);
+            debug_assert!(
+                record.is_none(),
+                "a new game can't end before its first move"
+            );
+            i += 1;
+        }
+
+        if games.is_empty() {
+            return score;
+        }
+
+        // Each network evaluates the positions of the searches for its own moves. How many that
+        // is changes every step, so the batches are padded to reuse a few sizes.
+        for (network, model) in networks.iter().enumerate() {
+            let searching: Vec<usize> = (0..games.len())
+                .filter(|&i| games[i].0.network_to_move(games[i].1) == network)
+                .collect();
+            if searching.is_empty() {
+                continue;
+            }
+
+            let states: Vec<&State> = searching.iter().map(|&i| &games[i].0.state).collect();
+            let moves: Vec<&[Move]> = searching
+                .iter()
+                .map(|&i| games[i].0.search.leaf_moves())
+                .collect();
+            let evaluations = model.evaluate_padded(&states, &moves, device);
+            for (&i, evaluation) in searching.iter().zip(evaluations) {
+                games[i].0.apply(evaluation, config);
+            }
+        }
+    }
+}
+
 /// Mixes Dirichlet(alpha) noise into `priors`, which keep summing to 1. The noise is drawn by
 /// normalizing independent Gamma(alpha, 1) samples.
 fn add_noise(priors: &mut [f32], alpha: f32, fraction: f32, rng: &mut impl Rng) {
@@ -514,6 +628,53 @@ mod tests {
         assert_eq!(results(GameResult::BlackWins), [-1, 1, -1]);
         assert_eq!(results(GameResult::Draw), [0, 0, 0]);
         assert_eq!(results(GameResult::PlyLimit), [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_match_plays_every_game() {
+        let (first, second) = (tiny_model(), tiny_model());
+        let config = SelfPlayConfig::new()
+            .with_n_parallel(4)
+            .with_n_games(6)
+            .with_max_plies(40)
+            .with_noise_fraction(0.0)
+            .with_sampling_plies(4);
+        let mcts_config = MctsConfig::new().with_n_sims(8);
+        let play = || {
+            play_match(
+                [&first, &second],
+                &mcts_config,
+                &config,
+                &Default::default(),
+            )
+        };
+
+        let score = play();
+        assert_eq!(score.games(), 6);
+        assert_eq!(play(), score);
+    }
+
+    #[test]
+    fn match_scores_imply_elo_differences() {
+        let score = |wins, draws, losses| MatchScore {
+            wins,
+            draws,
+            losses,
+        };
+        assert_eq!(score(3, 4, 3).elo(), 0.0);
+        assert!((score(3, 0, 1).elo() - 190.85).abs() < 0.01);
+        assert!((score(1, 0, 3).elo() + 190.85).abs() < 0.01);
+        // A sweep counts as half a game short of one
+        assert_eq!(score(10, 0, 0).elo(), score(19, 0, 1).elo());
+    }
+
+    #[test]
+    fn searches_alternate_between_the_networks() {
+        let mut game = Game::new(&MctsConfig::new(), 0);
+        assert_eq!(game.network_to_move(1), 1);
+        game.ply = 1;
+        assert_eq!(game.network_to_move(1), 0);
+        assert_eq!(game.network_to_move(0), 1);
     }
 
     #[test]

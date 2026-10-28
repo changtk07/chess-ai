@@ -291,6 +291,27 @@ impl<B: Backend> TransformerModel<B> {
             })
             .collect()
     }
+
+    /// Like `evaluate`, but pads the batch to a power of two by repeating its last position. burn
+    /// compiles kernels for every new batch size, which takes far longer than evaluating, so a
+    /// batch whose size keeps changing is better off reusing a few sizes.
+    pub(crate) fn evaluate_padded(
+        &self,
+        states: &[&State],
+        moves: &[&[Move]],
+        device: &B::Device,
+    ) -> Vec<Evaluation> {
+        let n = states.len();
+        let size = n.next_power_of_two();
+        let mut states = states.to_vec();
+        let mut moves = moves.to_vec();
+        states.resize(size, states[n - 1]);
+        moves.resize(size, moves[n - 1]);
+
+        let mut evaluations = self.evaluate(&states, &moves, device);
+        evaluations.truncate(n);
+        evaluations
+    }
 }
 
 #[derive(Config, Debug)]
@@ -410,6 +431,25 @@ mod tests {
             assert!((evaluation.priors.iter().sum::<f32>() - 1.0).abs() < 1e-5);
             assert!(max_diff(&evaluation.priors, &single.priors) < 1e-5);
             assert!((evaluation.value - single.value).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn padding_leaves_evaluations_unchanged() {
+        let model = tiny_model();
+        let device = Default::default();
+        let states: Vec<State> = FENS.iter().map(|fen| State::from_fen(fen)).collect();
+        let states: Vec<&State> = states.iter().collect();
+        let moves: Vec<_> = states.iter().map(|state| state.generate_moves()).collect();
+        let moves: Vec<&[Move]> = moves.iter().map(|moves| &moves[..]).collect();
+
+        // Three positions are padded to four
+        let padded = model.evaluate_padded(&states, &moves, &device);
+        let plain = model.evaluate(&states, &moves, &device);
+        assert_eq!(padded.len(), 3);
+        for (padded, plain) in padded.iter().zip(&plain) {
+            assert!(max_diff(&padded.priors, &plain.priors) < 1e-6);
+            assert!((padded.value - plain.value).abs() < 1e-6);
         }
     }
 

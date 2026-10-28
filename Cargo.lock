@@ -1029,6 +1029,7 @@ dependencies = [
  "burn",
  "rand 0.9.4",
  "rand_distr",
+ "serde_json",
 ]
 
 [[package]]
