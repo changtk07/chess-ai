@@ -84,7 +84,8 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
   - Caching evaluations by Zobrist hash and halfmove clock is an alternative or a complement.
 - [ ] Training:
   - [x] A training loop alternating self-play and training, with runs that stop at any point and continue on either machine.
-  - [ ] A throwaway run on the laptop, to check that the network learns and to tune the run's settings.
+  - [x] A throwaway run on the laptop: the network learns, and generation 10 beat generation 0 by 35 wins to 9, with 84 draws. Results and findings in [docs/training.md](docs/training.md).
+  - [ ] Before a long run: choose the value head (a single score, or win, draw and loss probabilities) and the learning rate and training steps, as `docs/training.md` explains.
   - [x] Matches between a run's networks with `cinder match`, against references kept every ten generations, or each generation against the one before.
 - [ ] Once the network is trained, score unvisited moves with first-play urgency (the parent's value minus a reduction, as Leela does) instead of as draws.
 - [ ] UCI interface:
