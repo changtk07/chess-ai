@@ -20,7 +20,7 @@ use burn::{
         Tensor, TensorData,
     },
 };
-use std::path::Path;
+use std::{fs, io, path::Path};
 
 /// Gradients are scaled down to at most this norm, so one unusual batch can't wreck the weights
 const MAX_GRADIENT_NORM: f32 = 1.0;
@@ -140,6 +140,17 @@ pub(crate) fn load_model<B: Backend>(
     config
         .init(device)
         .load_file(dir.join(MODEL_FILE), &recorder(), device)
+}
+
+/// Deletes a checkpoint's optimizer state, leaving a network that can play but not train further.
+pub(crate) fn remove_optimizer_state(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.file_stem().is_some_and(|stem| stem == OPTIMIZER_FILE) {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 fn recorder() -> NamedMpkFileRecorder<FullPrecisionSettings> {

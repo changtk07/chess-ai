@@ -354,11 +354,19 @@ pub(crate) struct MatchScore {
     pub(crate) wins: usize,
     pub(crate) draws: usize,
     pub(crate) losses: usize,
+    /// Of the draws, games stopped at the ply limit
+    pub(crate) stopped: usize,
+    /// Plies played in all games together
+    pub(crate) plies: usize,
 }
 
 impl MatchScore {
     pub(crate) fn games(&self) -> usize {
         self.wins + self.draws + self.losses
+    }
+
+    pub(crate) fn average_plies(&self) -> f64 {
+        self.plies as f64 / self.games().max(1) as f64
     }
 
     /// Points per game, a draw counting half.
@@ -406,8 +414,13 @@ pub(crate) fn play_match<B: Backend>(
                 GameResult::WhiteWins if white == 0 => score.wins += 1,
                 GameResult::BlackWins if white == 1 => score.wins += 1,
                 GameResult::WhiteWins | GameResult::BlackWins => score.losses += 1,
-                GameResult::Draw | GameResult::PlyLimit => score.draws += 1,
+                GameResult::Draw => score.draws += 1,
+                GameResult::PlyLimit => {
+                    score.draws += 1;
+                    score.stopped += 1;
+                }
             }
+            score.plies += record.plies;
 
             if n_started == config.n_games {
                 games.remove(i);
@@ -660,6 +673,7 @@ mod tests {
             wins,
             draws,
             losses,
+            ..MatchScore::default()
         };
         assert_eq!(score(3, 4, 3).elo(), 0.0);
         assert!((score(3, 0, 1).elo() - 190.85).abs() < 0.01);

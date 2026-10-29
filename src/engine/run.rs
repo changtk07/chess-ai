@@ -4,8 +4,9 @@
 //! - `config.json`: the run's settings, written when it's created. They can be edited between
 //!   sessions, except for the network size, which the checkpoints must match.
 //! - `checkpoints/NNNNN/`: the network after NNNNN generations of training, with its optimizer
-//!   state, at full precision whatever backend wrote it. The latest two are kept, and generation
-//!   0's untrained network as a fixed reference.
+//!   state, at full precision whatever backend wrote it. The latest two are kept whole, and the
+//!   networks of generation 0 and every `keep_every`-th generation stay without their optimizer
+//!   state, as references to measure progress against with `cinder match`.
 //! - `samples/NNNNN.bin`: the games generation NNNNN's network played, in the format described in
 //!   `samples.rs`. The file is complete once checkpoint NNNNN + 1 exists, and never changes after.
 //! - `history.csv`: a line per generation trained: its games' results, its training losses, and
@@ -26,7 +27,7 @@ use crate::engine::{
     model::TransformerModelConfig,
     samples::{read_samples, Sample, SampleWriter},
     self_play::{play_match, progress_line, MatchScore, SelfPlay, SelfPlayConfig, SelfPlayStats},
-    training::{load_model, Losses, Trainer},
+    training::{load_model, remove_optimizer_state, Losses, Trainer},
 };
 use burn::{
     config::Config,
@@ -74,12 +75,16 @@ pub(crate) struct RunConfig {
     #[config(default = 1e-4)]
     pub(crate) weight_decay: f32,
     /// Games each newly trained network plays against the one it was trained from, to measure
-    /// progress; 0 to skip
-    #[config(default = 128)]
+    /// progress; 0 to skip. Early networks draw nearly all such games, so it's off by default.
+    #[config(default = 0)]
     pub(crate) eval_games: usize,
     /// Simulations per move in those games, fewer than in self-play to keep them cheap
     #[config(default = 50)]
     pub(crate) eval_sims: usize,
+    /// The network of every this many generations is kept for good, as a reference to measure
+    /// later ones against; 0 keeps only generation 0's
+    #[config(default = 10)]
+    pub(crate) keep_every: usize,
     /// Fixes the initial weights, and with the generation, every game's random choices
     #[config(default = 0)]
     pub(crate) seed: u64,
@@ -184,7 +189,8 @@ impl Run {
     }
 
     // Writes the checkpoint under a temporary name and renames it, so a checkpoint either exists
-    // whole or not at all, then deletes all but generation 0 and the latest two
+    // whole or not at all. Then deletes older checkpoints but the latest two, keeping the networks
+    // of reference generations without the optimizer state they no longer need.
     fn save_checkpoint<B: AutodiffBackend>(
         &self,
         trainer: &Trainer<B>,
@@ -201,10 +207,16 @@ impl Run {
             .map_err(|error| io::Error::other(format!("can't save checkpoint: {error:?}")))?;
         fs::rename(&temporary, &dir)?;
 
-        for old in 1..generation.saturating_sub(1) {
-            let old = self.checkpoint_dir(old);
-            if old.exists() {
-                fs::remove_dir_all(old)?;
+        let keep_every = self.config.keep_every;
+        for old in 0..generation.saturating_sub(1) {
+            let dir = self.checkpoint_dir(old);
+            if !dir.exists() {
+                continue;
+            }
+            if old == 0 || (keep_every > 0 && old.is_multiple_of(keep_every)) {
+                remove_optimizer_state(&dir)?;
+            } else {
+                fs::remove_dir_all(dir)?;
             }
         }
         Ok(())
@@ -484,14 +496,16 @@ fn evaluate<P: Backend>(
         device,
     )?;
     println!(
-        "Generation {generation} against {}: {} wins, {} draws, {} losses at {} simulations per \
-         move, {:+.0} Elo, in {:.0}s",
+        "Generation {generation} against {}: {} wins, {} draws ({} at the ply limit), {} losses \
+         at {} simulations per move, {:+.0} Elo; {:.0} plies on average, in {:.0}s",
         generation - 1,
         score.wins,
         score.draws,
+        score.stopped,
         score.losses,
         config.eval_sims,
         score.elo(),
+        score.average_plies(),
         start.elapsed().as_secs_f64()
     );
     Ok(score)
@@ -616,6 +630,7 @@ mod tests {
             .with_warmup_steps(1)
             .with_eval_games(2)
             .with_eval_sims(4)
+            .with_keep_every(5)
     }
 
     fn train_generations(run: &Run, n: usize) {
@@ -654,8 +669,14 @@ mod tests {
         assert_eq!(run.latest_generation().unwrap(), 1);
         train_generations(&run, 2);
 
-        // Generation 0 stays as a reference
+        // Generation 0 stays as a reference, without the optimizer state it no longer needs
         assert_eq!(checkpoints(&dir), ["00000", "00002", "00003"]);
+        let reference: Vec<_> = fs::read_dir(dir.join("checkpoints/00000"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(reference, ["model.mpk"]);
+        assert!(run.load_network::<NdArray>(0, &Default::default()).is_ok());
         assert_generation(&dir.join("samples/00001.bin"), 1);
         assert_generation(&dir.join("samples/00002.bin"), 2);
         let history = fs::read_to_string(dir.join(HISTORY_FILE)).unwrap();

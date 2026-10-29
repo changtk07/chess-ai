@@ -264,13 +264,15 @@ fn play_match<B: Backend>(mut args: Vec<String>, device: &B::Device) {
     )
     .unwrap_or_else(|error| fail(&error));
     println!(
-        "Generation {first} against {second}: {} wins, {} draws, {} losses, scoring {:.3}, \
-         {:+.0} Elo, in {:.0}s",
+        "Generation {first} against {second}: {} wins, {} draws ({} at the ply limit), {} losses, \
+         scoring {:.3}, {:+.0} Elo; {:.0} plies on average, in {:.0}s",
         score.wins,
         score.draws,
+        score.stopped,
         score.losses,
         score.score(),
         score.elo(),
+        score.average_plies(),
         start.elapsed().as_secs_f64()
     );
 }
