@@ -47,7 +47,7 @@ Commands:
   perft [depth]       count positions from the start, per root move
 
 self-play, bench and new runs also take the network's size: [--blocks 8]
-[--width 384], where the width is a multiple of 64";
+[--width 256], where the width is a multiple of 64";
 
 // Settings a run fixes when it's created
 const RUN_OPTIONS: [&str; 6] = [

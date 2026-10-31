@@ -319,7 +319,7 @@ pub(crate) struct TransformerModelConfig {
     #[config(default = 8)]
     pub(crate) n_blocks: usize,
     /// The model width is the number of heads times the head dimension
-    #[config(default = 6)]
+    #[config(default = 4)]
     pub(crate) n_heads: usize,
     #[config(default = 2.0)]
     d_ff_scale: f64,

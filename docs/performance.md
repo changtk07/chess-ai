@@ -26,7 +26,7 @@ The work is in the commits from `feat: add bench command for network and search 
 
 ## Measurements
 
-Default network: 8 blocks, width 384, about 1.3 GFLOPs per position.
+Unless they say otherwise, the measurements below use 8 blocks of width 384, the default until 2026-10-31, at about 1.3 GFLOPs per position. The default is now 8 × 256, chosen from the network size measurements below.
 
 ### Before
 
@@ -152,6 +152,7 @@ At about 15,500 simulations/s and 800 simulations per move, a 150-ply game is 12
 ## Decisions
 
 - **bf16 for self-play.** It's about as fast as f16, can't overflow (f16's maximum is 65,504, which trained activations could exceed), and holds up better at large batches. Its accuracy is within 3e-3 of the CPU. f16 is a one-flag switch if accuracy turns out to matter.
+- **8 blocks of width 256 by default,** on both machines, since a training run moves between them. 6 blocks would play about 30% faster on the desktop but only 5–10% on the laptop, with a shallower network; 8 × 384 plays 1.35× slower on the desktop and 2× on the laptop. 8 × 256 also learned in the throwaway training run ([training.md](training.md)). A bigger network may pay off once this one stops improving.
 - **256 parallel games by default.** 512 and 1,024 were no faster and use more memory.
 - **Tree work on one thread,** per the measurements above.
 - **The CPU stays the default backend,** so tests and other machines stay portable. Pass `--backend cuda-bf16` for self-play.

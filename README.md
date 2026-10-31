@@ -8,13 +8,13 @@ The network isn't trained yet. The engine plays complete, legal games, but with 
 
 ```sh
 cargo run --release -- self-play --backend cuda-bf16   # play 256 games at once with untrained weights
-cargo run --release -- train runs/first --backend cuda-bf16 --blocks 8 --width 256   # train, resumably
+cargo run --release -- train runs/first --backend cuda-bf16   # train, resumably
 cargo run --release -- bench     # network throughput by batch size (up to 256), and search speed
 cargo run --release -- perft 5   # count positions at depth 5 from the start, per root move
 cargo test                       # move generation, game outcome, search and self-play tests
 ```
 
-`self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Both `self-play` and `bench` take `--blocks` (8) and `--width` (384, a multiple of 64) to try other network sizes. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, applying its results, and writing samples.
+`self-play` takes `--parallel` (games at once, 256), `--sims` (simulations per move, 800), `--games` (total, 256) and `--seed`. Both `self-play` and `bench` take `--blocks` (8) and `--width` (256, a multiple of 64) to try other network sizes. Every few seconds it reports simulations and network evaluations per second, the average batch size, and how the time splits between tree search, the network, applying its results, and writing samples.
 
 With `--out data/selfplay.bin`, each finished game's training samples are appended to that file: one per move played, with the position, every legal move's visit count from its search, and the game's result for the side to move. Games stopped at the ply limit count as draws. The format is described in `src/engine/samples.rs`.
 
@@ -44,7 +44,7 @@ burn's wgpu backend isn't enabled: under WSL2 it finds no Vulkan adapter, so the
 
 - Input is 64 tokens, one per square: a piece embedding, a square embedding, and an embedding of the castling rights, en passant file and halfmove clock, added together. A separate 65th token for those would make attention about a third slower.
 - The board is seen from the side to move: for black it's mirrored top to bottom with the colors swapped, and moves are mirrored to match. The network learns each pattern once rather than once per color. Chess is the same game mirrored, so the side to move isn't an input, and a position and its mirror image evaluate identically.
-- 8 pre-norm transformer blocks: 6 heads, model width 384, RMSNorm, GELU. A final RMSNorm normalizes the residual stream before the heads.
+- 8 pre-norm transformer blocks: 4 heads, model width 256, RMSNorm, GELU. A final RMSNorm normalizes the residual stream before the heads.
 - The blocks keep every position's tokens in one 2D matrix, which burn multiplies faster than the 3D form, and attention projects queries, keys and values with a single matrix multiply.
 - Policy head: 73 move planes per square, 4,672 moves in total, using the AlphaZero encoding in `src/engine/encoding.rs`. Only the legal moves' logits are gathered on the device, so the softmax and the data read back cover just those moves.
 - Value head: reduces each square to 32 features, then reads all 64 squares' features together through a 128-unit layer to a tanh score in [−1, 1] for the side to move, as Leela's transformer networks do.
