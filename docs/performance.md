@@ -1,8 +1,8 @@
 # Performance notes
 
-How self-play runs fast on an RTX 4090 under WSL2, with measurements to compare future changes against and the pitfalls hit along the way. Measured 2026-10-25 and 2026-10-26; the 2D layers and fused attention were measured on a laptop on 2026-10-28, and the 4090 figures predate them.
+How self-play runs fast on an RTX 4090 under WSL2, with measurements to compare future changes against and the pitfalls hit along the way. Measured 2026-10-25 and 2026-10-26; the 2D layers and fused attention were measured on a laptop on 2026-10-28, and the 4090 figures predate them, except the network size measurements of 2026-10-31.
 
-Self-play runs at about 15,500 simulations/s: 256 games at once, with their positions evaluated in batches on the GPU in bf16 and the tree work on one CPU thread. Before this work it ran about 30 simulations/s on the CPU. The network is now about 98% of every step, so further speed has to come from the network.
+Self-play runs at about 43,000 simulations/s on the 4090 with the default network of 8 blocks of width 256: 512 games at once, with their positions evaluated in batches on the GPU in bf16 and the tree work on one CPU thread. Before this work it ran about 30 simulations/s on the CPU, and the first batched version ran about 15,500 with 8 blocks of width 384. The network is still about 95% of every step, so further speed has to come from the network.
 
 The work is in the commits from `feat: add bench command for network and search throughput` (826ed90) through `feat: play self-play games in parallel with batched evaluation`.
 
@@ -143,17 +143,16 @@ Extra cores become worth it only once the network is roughly 10× faster and the
 
 ## Throughput math
 
-At about 15,500 simulations/s and 800 simulations per move, a 150-ply game is 120,000 evaluations, so about 465 games per hour across all slots. AlphaZero-style training wants tens of thousands of games, so the bigger levers are:
+At about 43,000 simulations/s on the 4090 and 800 simulations per move, a 150-ply game is 120,000 evaluations, so about 1,300 games per hour across all slots. At the 200 simulations per move `train` uses, it's about 5,200 games per hour, so a generation's 512 games take about six minutes; the laptop plays about two thirds as many. AlphaZero-style training wants tens of thousands of games, so the remaining levers are:
 
-- Fewer simulations per move (100–200), with occasional full searches ("playout cap randomization", as KataGo does). At 150 simulations it would be about 2,500 games per hour.
-- A smaller network for early training.
+- Occasional full searches among the cheap ones ("playout cap randomization", as KataGo does), so value targets come from strong searches without every move paying for one.
 - The kernel headroom above.
 
 ## Decisions
 
 - **bf16 for self-play.** It's about as fast as f16, can't overflow (f16's maximum is 65,504, which trained activations could exceed), and holds up better at large batches. Its accuracy is within 3e-3 of the CPU. f16 is a one-flag switch if accuracy turns out to matter.
 - **8 blocks of width 256 by default,** on both machines, since a training run moves between them. 6 blocks would play about 30% faster on the desktop but only 5–10% on the laptop, with a shallower network; 8 × 384 plays 1.35× slower on the desktop and 2× on the laptop. 8 × 256 also learned in the throwaway training run ([training.md](training.md)). A bigger network may pay off once this one stops improving.
-- **256 parallel games by default.** 512 and 1,024 were no faster and use more memory.
+- **512 parallel games by default,** on both machines. On the desktop 512 games beat 256 by 1.35–1.7× at width 256, and on the laptop they did as well as or better than 256; 1,024 added little on either. (With 8 × 384 before the 2D layers and 64 tokens, 256 had been as fast as 512 and 1,024.)
 - **Tree work on one thread,** per the measurements above.
 - **The CPU stays the default backend,** so tests and other machines stay portable. Pass `--backend cuda-bf16` for self-play.
 - **Attention is written out** rather than calling `burn::tensor::module::attention`. In burn 0.20 that op falls back to the same naive steps under the fusion backend, so it gains nothing, and without fusion the CUDA backend runs a flash-attention kernel with a causal mask hard-coded, which would silently stop squares from attending to later squares.

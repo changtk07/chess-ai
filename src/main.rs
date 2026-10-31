@@ -31,10 +31,10 @@ const USAGE: &str = "\
 Usage: cinder <command> [--backend cpu|cuda|cuda-f16|cuda-bf16]
 
 Commands:
-  self-play [--parallel 256] [--sims 800] [--games 256] [--seed 0] [--out file]
+  self-play [--parallel 512] [--sims 800] [--games 512] [--seed 0] [--out file]
                       play games with untrained weights, reporting throughput and
                       appending each finished game's training samples to the file
-  train <dir> [--parallel 256] [--generations N]
+  train <dir> [--parallel 512] [--generations N]
                       play and train generation after generation in the run in dir,
                       creating it if needed. Stop it any time, then run the same
                       command, here or on another machine, to continue. Training runs
@@ -187,7 +187,7 @@ fn train<P: Backend, T: AutodiffBackend>(mut args: Vec<String>) {
         Some(dir) if !dir.starts_with("--") => PathBuf::from(args.remove(0)),
         _ => usage_error("train needs a run directory"),
     };
-    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 256);
+    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 512);
     let n_generations: Option<usize> =
         take_option(&mut args, "--generations").map(|value| parse("--generations", &value));
     if n_parallel == 0 {
@@ -285,9 +285,9 @@ fn fail(error: &std::io::Error) -> ! {
 fn self_play<B: Backend>(mut args: Vec<String>, device: &B::Device) {
     let model_config = take_model_config(&mut args);
     let out = take_option(&mut args, "--out");
-    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 256);
+    let n_parallel: usize = take_parsed_option(&mut args, "--parallel", 512);
     let n_sims: usize = take_parsed_option(&mut args, "--sims", 800);
-    let n_games: usize = take_parsed_option(&mut args, "--games", 256);
+    let n_games: usize = take_parsed_option(&mut args, "--games", 512);
     let seed: u64 = take_parsed_option(&mut args, "--seed", 0);
     reject_leftovers(&args);
 
