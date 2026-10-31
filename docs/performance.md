@@ -121,6 +121,20 @@ Self-play simulations/s on the laptop with 64 tokens, `--backend cuda-bf16`, fro
 
 From 8 blocks up, time grows about in proportion to the number of blocks. Below that, the work outside the blocks stops shrinking: 6 blocks gained only 5–10% over 8, with the network still about 93% of each step. 512 games helped the smaller networks and made no difference to the larger ones. Runs differ by up to about 10% on the laptop, so treat smaller gaps as noise.
 
+The same measurement on the 4090 desktop on 2026-10-31, with `scripts/bench-sizes.sh` averaging 24 reports (two minutes) per run:
+
+| blocks × width | 256 games | 512 games | 1,024 games |
+|---|---|---|---|
+| 6 × 256 | 36,530 | **57,980** | 56,506 |
+| 8 × 256 | 30,614 | 42,746 | 44,136 |
+| 10 × 256 | 25,088 | 33,924 | 40,951 |
+| 12 × 256 | 22,478 | 37,289 | 34,982 |
+| 8 × 384 | 29,130 | 31,676 | 31,322 |
+
+Two more runs of each 512-game figure for 6, 8 and 10 blocks, alternating sizes, gave 59,598 and 50,948 for 6 blocks, 45,083 and 40,829 for 8, and 34,178 and 33,670 for 10. The sweep's own 10-block run at 512 games measured 43,101, a fluke; the table shows the other two runs' average. Runs differ by up to about 15% on the desktop.
+
+Unlike the laptop, the desktop gains from 256 to 512 games at every size, 1.35–1.7× at width 256, and 1,024 adds little more. The exception, 10 blocks at 40,951, was measured only once. Fewer blocks also pay off further down: 6 blocks run about 30% faster than 8, against 5–10% on the laptop. During the sweep the GPU drew about 320 W of its 450 W limit, at about 80% utilization, and held its clocks, so it wasn't throttled. The desktop runs 8 × 256 at 512 games about 1.55× as fast as the laptop, and 6 × 256 about 1.9×.
+
 ## CPU parallelism
 
 Tree work on one thread takes about 0.36 ms per 256-game step, against about 17 ms for the network. With rayon over 24 threads it took about 3.6 ms, and the network call itself rose from about 17.4 to 18.9 ms. Dispatching thousands of microsecond tasks costs more than it saves, and idle workers likely compete with the thread driving the GPU. Rayon was slower at every size tried, so the tree work is sequential.
@@ -146,7 +160,7 @@ At about 15,500 simulations/s and 800 simulations per move, a 150-ply game is 12
 ## Benchmarking pitfalls
 
 1. **Other GPU load skews everything.** A game running on Windows kept the GPU at about 99% and made identical runs differ by up to 11×. WSL can't see Windows processes, so check `nvidia-smi` power first (about 30–70 W when idle), and use Task Manager or `nvidia-smi` in PowerShell to find the culprit.
-2. **The first calls for each new tensor shape compile and autotune kernels.** Autotune results persist in `target/autotune`, but compiled kernels don't survive the process, so each run recompiles. `bench` keeps warming up until calls stop getting faster; skip the first self-play reports.
+2. **The first calls for each new tensor shape compile and autotune kernels.** Autotune results persist in `target/autotune`, but compiled kernels don't survive the process, so each run recompiles. `bench` keeps warming up until calls stop getting faster; skip the first self-play reports. A machine's first run of a new network size or batch size also autotunes, which stalled self-play on the desktop for up to about two minutes before its first fast report, so wait for reports to speed up rather than skipping a fixed number.
 3. **Uploading many tiny tensors and stacking them stalls burn's fusion optimizer** on one CPU core, and the cost grows faster than linearly with the number of operations. Build each batch in one host buffer and upload it once.
 4. **A scratch copy of the repo that shares `CARGO_TARGET_DIR` reuses the repo's binaries,** because cargo doesn't hash the absolute path. Rename the package in the copy's `Cargo.toml`.
 5. **Stack sampling needs `sudo eu-stack -p <pid>`,** since ptrace is restricted for normal users.
